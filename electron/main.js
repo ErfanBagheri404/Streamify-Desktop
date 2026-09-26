@@ -135,9 +135,12 @@ function startNext() {
   const appDir = path.join(ROOT, "app");
   const nextBin = path.join(appDir, "node_modules", "next", "dist", "bin", "next");
 
+  // No --hostname: Next then binds all interfaces, so both `localhost` (IPv6,
+  // what the renderer and the Supabase redirect allowlist use) and `127.0.0.1`
+  // (IPv4, what scripts use) resolve. `--hostname localhost` binds ::1 only.
   nextProc = spawn(
     process.execPath,
-    [nextBin, isDev ? "dev" : "start", "--webpack", "--hostname", "localhost", "--port", String(APP_PORT)],
+    [nextBin, isDev ? "dev" : "start", "--webpack", "--port", String(APP_PORT)],
     {
       cwd: appDir,
       env: {

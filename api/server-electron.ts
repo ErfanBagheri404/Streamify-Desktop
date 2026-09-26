@@ -85,6 +85,7 @@ export async function startApiServer(
       }
 
       const method = req.method || "GET";
+      const startedAt = Date.now();
       const hasBody = !["GET", "HEAD"].includes(method);
       const requestInit: RequestInit & { duplex?: "half" } = {
         method,
@@ -105,6 +106,15 @@ export async function startApiServer(
       response.headers.forEach((value, key) => {
         res.setHeader(key, value);
       });
+
+      // Access log: proves requests are served in-process (no network hop) and
+      // shows how long each one took, which is the whole point of embedding the API.
+      if (process.env.STREAMIFY_API_LOG !== "0") {
+        const path = (req.url || "/").split("?")[0];
+        console.log(
+          `[api] ${method} ${path} ${response.status} ${Date.now() - startedAt}ms`
+        );
+      }
 
       if (!response.body) {
         res.end();
