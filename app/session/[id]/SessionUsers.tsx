@@ -1,0 +1,212 @@
+"use client";
+
+import { useState, useRef, useEffect } from "react";
+import { createPortal } from "react-dom";
+import type { SessionState } from "./types";
+
+const ROLE_STYLES: Record<string, { bg: string; color: string; label: string }> = {
+  admin: { bg: "rgba(239,68,68,0.15)", color: "#fca5a5", label: "Admin" },
+  dj: { bg: "rgba(168,85,247,0.15)", color: "#d8b4fe", label: "DJ" },
+  listener: { bg: "var(--surface-3)", color: "var(--muted-foreground)", label: "Listener" },
+};
+
+interface SessionUsersProps {
+  state: SessionState;
+  discordUser?: import("./types").DiscordUser | null;
+  myRole?: "admin" | "dj" | "listener";
+  sendCommand?: (type: string, payload?: Record<string, unknown>) => void;
+}
+
+function getAvatarUrl(userId: string, avatar: string | null | undefined): string | null {
+  if (!avatar) return null;
+  if (avatar.startsWith("http")) return avatar;
+  return `https://cdn.discordapp.com/avatars/${userId}/${avatar}.png?size=64`;
+}
+
+function RoleBadge({
+  userId,
+  role,
+  isAdmin,
+  onChangeRole,
+}: {
+  userId: string;
+  role: string;
+  isAdmin: boolean;
+  onChangeRole?: (userId: string, role: "admin" | "dj" | "listener") => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [menuPos, setMenuPos] = useState<{ top: number; right: number }>({ top: 0, right: 0 });
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const style = ROLE_STYLES[role] ?? ROLE_STYLES.listener;
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (btnRef.current && !btnRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  const handleOpen = () => {
+    if (btnRef.current) {
+      const rect = btnRef.current.getBoundingClientRect();
+      setMenuPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+    }
+    setOpen(!open);
+  };
+
+  if (!isAdmin || !onChangeRole) {
+    return (
+      <span
+        className="flex-shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium"
+        style={{ background: style.bg, color: style.color }}
+      >
+        {style.label}
+      </span>
+    );
+  }
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        onClick={handleOpen}
+        className="flex-shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium transition-opacity hover:opacity-80 cursor-pointer"
+        style={{ background: style.bg, color: style.color }}
+      >
+        {style.label}
+      </button>
+      {open && createPortal(
+        <div
+          className="fixed z-[9999] min-w-[100px] rounded-lg border py-1 shadow-lg"
+          style={{
+            background: "var(--surface-1)",
+            borderColor: "var(--border-subtle)",
+            top: menuPos.top,
+            right: menuPos.right,
+          }}
+        >
+          {(["admin", "dj", "listener"] as const).map((r) => {
+            const s = ROLE_STYLES[r];
+            return (
+              <button
+                key={r}
+                onClick={() => {
+                  onChangeRole(userId, r);
+                  setOpen(false);
+                }}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-[11px] font-medium transition-colors hover:bg-white/[0.06]"
+                style={{ color: s.color }}
+              >
+                {r === role && <span className="text-[8px]">&#9679;</span>}
+                {r !== role && <span className="w-[8px]" />}
+                {s.label}
+              </button>
+            );
+          })}
+        </div>,
+        document.body
+      )}
+    </>
+  );
+}
+
+export function SessionUsers({ state, discordUser, myRole, sendCommand }: SessionUsersProps) {
+  const { roles, userNames, userAvatars, createdBy } = state;
+  const entries = Object.entries(roles);
+  const isAdmin = myRole === "admin";
+
+  const handleChangeRole = (userId: string, role: "admin" | "dj" | "listener") => {
+    if (sendCommand) sendCommand("role", { userId, role });
+  };
+
+  return (
+    <div className="rounded-xl border p-5 sm:p-6" style={{ background: "var(--surface-1)", borderColor: "var(--border-subtle)" }}>
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-base font-semibold">Connected Users</h3>
+        <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "var(--surface-3)", color: "var(--muted-foreground)" }}>
+          {entries.length}
+        </span>
+      </div>
+
+      {entries.length === 0 ? (
+        <p className="text-sm text-center py-6" style={{ color: "var(--muted-foreground)" }}>
+          No users connected yet.
+        </p>
+      ) : (
+        <ul className="space-y-1 max-h-[280px] overflow-y-auto hide-scrollbar">
+          {entries.map(([userId, role]) => {
+            const isCreator = createdBy.id === userId;
+            const displayName = userNames?.[userId] || createdBy.username || userId;
+            const avatarUrl = getAvatarUrl(userId, userAvatars?.[userId]);
+            const avatarFallback = ROLE_STYLES[role] ?? ROLE_STYLES.listener;
+
+            return (
+              <li
+                key={userId}
+                className="flex items-center gap-3 rounded-xl px-3 py-2.5 transition-colors hover:bg-white/[0.04]"
+              >
+                {/* Avatar */}
+                {avatarUrl ? (
+                  <img
+                    src={avatarUrl}
+                    alt=""
+                    className="h-8 w-8 flex-shrink-0 rounded-full object-cover"
+                    referrerPolicy="no-referrer"
+                    onError={(e) => {
+                      e.currentTarget.style.display = "none";
+                      const fallback = e.currentTarget.nextElementSibling as HTMLElement;
+                      if (fallback) fallback.style.display = "flex";
+                    }}
+                  />
+                ) : null}
+                <div
+                  className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-xs font-bold"
+                  style={{
+                    background: avatarFallback.bg,
+                    color: avatarFallback.color,
+                    display: avatarUrl ? "none" : "flex",
+                  }}
+                >
+                  {displayName.charAt(0).toUpperCase()}
+                </div>
+
+                {/* Name */}
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium truncate">
+                    {displayName}
+                    {isCreator && (
+                      <span className="ml-1.5 text-[10px] font-normal" style={{ color: "var(--muted-foreground)" }}>
+                        (creator)
+                      </span>
+                    )}
+                  </p>
+                </div>
+
+                {/* Role badge — clickable dropdown for admin */}
+                <RoleBadge
+                  userId={userId}
+                  role={role}
+                  isAdmin={isAdmin}
+                  onChangeRole={handleChangeRole}
+                />
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      {/* Your role indicator */}
+      <div
+        className="mt-3 rounded-xl px-3 py-2 text-xs"
+        style={{ background: "var(--surface-3)", color: "var(--muted-foreground)" }}
+      >
+        Your role: <span className="font-medium" style={{ color: ROLE_STYLES[myRole ?? "listener"].color }}>{ROLE_STYLES[myRole ?? "listener"].label}</span>
+        {!discordUser && (
+          <span className="ml-1">(connect Discord to identify)</span>
+        )}
+      </div>
+    </div>
+  );
+}

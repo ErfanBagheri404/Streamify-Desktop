@@ -1,0 +1,1144 @@
+"use client";
+
+import Link from "next/link";
+import type { User } from "@supabase/supabase-js";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useAudio, type AutoRetryPreference } from "../contexts/AudioContext";
+import { useToast } from "../contexts/ToastContext";
+import { useAppLanguage } from "../hooks/useAppLanguage";
+import { useSettings } from "../contexts/SettingsContext";
+import {
+  SEEK_STEP_OPTIONS,
+  type AppLanguage,
+  type AppTheme,
+  type PreferredSearchSource,
+} from "../lib/app-settings";
+import {
+  syncCloudLibrarySnapshot,
+} from "../lib/cloud-library-sync";
+import {
+  getUserAvatarUrl,
+  getUserDisplayName,
+  hasUserProvider,
+} from "../lib/auth-user";
+import { getSupabaseBrowserClient } from "../lib/supabase/browser";
+
+function SparkGlyph() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      className="h-4 w-4"
+      aria-hidden="true"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="m12 3 1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3Z"
+      />
+    </svg>
+  );
+}
+
+function Toggle({
+  enabled,
+  onClick,
+  disabled = false,
+}: {
+  enabled: boolean;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  const { isRtl } = useAppLanguage();
+  const justifyClass = enabled
+    ? isRtl
+      ? "justify-start"
+      : "justify-end"
+    : isRtl
+    ? "justify-end"
+    : "justify-start";
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`relative inline-flex h-8 w-14 items-center px-1 rounded-full transition ${justifyClass} ${
+        enabled ? "theme-accent-fill" : "theme-button-soft border"
+      } ${disabled ? "cursor-not-allowed opacity-45" : ""}`}
+      aria-pressed={enabled}
+    >
+      <span className="inline-block h-6 w-6 rounded-full bg-[color:var(--foreground)] shadow-[0_3px_10px_rgba(0,0,0,0.25)] transition" />
+    </button>
+  );
+}
+
+function ChoiceChip({
+  label,
+  selected,
+  onClick,
+  className = "",
+}: {
+  label: string;
+  selected: boolean;
+  onClick: () => void;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-full px-4 py-2 text-sm font-semibold transition ${className} ${
+        selected
+          ? "theme-accent-fill"
+          : "theme-button-soft hover:text-[color:var(--foreground)]"
+      }`}
+    >
+      {label}
+    </button>
+  );
+}
+
+function SettingRow({
+  label,
+  description,
+  control,
+  layout = "inline",
+}: {
+  label: string;
+  description: string;
+  control: ReactNode;
+  layout?: "inline" | "stacked";
+}) {
+  return (
+    <div
+      className={`theme-surface-soft flex rounded-xl border p-4 ${
+        layout === "stacked"
+          ? "flex-col gap-4"
+          : "flex-col gap-3 md:flex-row md:items-center md:justify-between"
+      }`}
+    >
+      <div className="min-w-0">
+        <p className="text-base font-semibold text-[color:var(--foreground)]">
+          {label}
+        </p>
+        <p className="theme-muted mt-1 max-w-2xl text-sm">{description}</p>
+      </div>
+      <div className={layout === "stacked" ? "w-full" : "shrink-0"}>
+        {control}
+      </div>
+    </div>
+  );
+}
+
+function ThemeChoiceCard({
+  label,
+  preview,
+  selected,
+  onClick,
+}: {
+  label: string;
+  preview: [string, string, string];
+  selected: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={selected}
+      className={`flex min-h-[4rem] w-full items-start gap-2.5 rounded-2xl border px-3 py-3 text-left text-sm font-semibold transition sm:min-h-0 sm:items-center sm:gap-3 sm:px-4 ${
+        selected
+          ? "theme-accent-soft border-transparent text-[color:var(--foreground)] shadow-[0_0_0_1px_var(--theme-accent)]"
+          : "theme-button-soft text-[color:color-mix(in_srgb,var(--foreground)_78%,transparent)] hover:text-[color:var(--foreground)]"
+      }`}
+    >
+      <span className="flex shrink-0 items-center gap-1.5">
+        {preview.map((color, index) => (
+          <span
+            key={`${label}-${index}`}
+            className="h-3 w-3 rounded-full border border-[color:var(--border-subtle)]"
+            style={{ backgroundColor: color }}
+          />
+        ))}
+      </span>
+      <span className="min-w-0 flex-1 whitespace-normal text-xs leading-tight text-start sm:truncate sm:whitespace-nowrap sm:text-sm">
+        {label}
+      </span>
+      <span
+        className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full border transition ${
+          selected
+            ? "theme-accent-fill border-transparent"
+            : "border-[color:var(--border-subtle)] bg-[color:color-mix(in_srgb,var(--foreground)_5%,transparent)] text-transparent"
+        }`}
+        aria-hidden="true"
+      >
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          viewBox="0 0 20 20"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          className="h-3.5 w-3.5"
+        >
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            d="m4 10 4 4 8-8"
+          />
+        </svg>
+      </span>
+    </button>
+  );
+}
+
+function Section({
+  eyebrow,
+  title,
+  description,
+  children,
+}: {
+  eyebrow: string;
+  title: string;
+  description: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="theme-surface-strong rounded-xl border p-5 md:p-6">
+      <p className="theme-muted text-xs font-semibold uppercase tracking-[0.22em]">
+        {eyebrow}
+      </p>
+      <h2 className="mt-3 text-2xl font-bold tracking-tight text-[color:var(--foreground)]">
+        {title}
+      </h2>
+      <p className="theme-muted mt-2 max-w-3xl text-sm">{description}</p>
+      <div className="mt-5 space-y-4">{children}</div>
+    </section>
+  );
+}
+
+function AutoRetryValue({
+  currentValue,
+  onChange,
+  labels,
+}: {
+  currentValue: AutoRetryPreference;
+  onChange: (value: AutoRetryPreference) => void;
+  labels: {
+    ask: string;
+    always: string;
+    never: string;
+  };
+}) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      <ChoiceChip
+        label={labels.ask}
+        selected={currentValue === "unknown"}
+        onClick={() => onChange("unknown")}
+      />
+      <ChoiceChip
+        label={labels.always}
+        selected={currentValue === "enabled"}
+        onClick={() => onChange("enabled")}
+      />
+      <ChoiceChip
+        label={labels.never}
+        selected={currentValue === "disabled"}
+        onClick={() => onChange("disabled")}
+      />
+    </div>
+  );
+}
+
+export default function SettingsPage() {
+  const { settings, updateSettings, resetSettings } = useSettings();
+  const { t, getSourceLabel, getThemeLabel } = useAppLanguage();
+  const supabase = useMemo(() => getSupabaseBrowserClient(), []);
+  const isCloudSyncAvailable = Boolean(supabase);
+  const cloudSyncUnavailableMessage =
+    "Cloud sync is unavailable until Supabase environment variables are configured.";
+  const {
+    autoRetryPreference,
+    enableAutoRetry,
+    disableAutoRetry,
+    resetAutoRetryPreference,
+  } = useAudio();
+  const [authUser, setAuthUser] = useState<User | null>(null);
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const { showToast } = useToast();
+
+  useEffect(() => {
+    let isMounted = true;
+
+    if (!supabase) {
+      setAuthUser(null);
+      setIsAuthLoading(false);
+      return;
+    }
+
+    const loadUser = async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      if (!isMounted) return;
+      setAuthUser(user);
+      setIsAuthLoading(false);
+    };
+
+    void loadUser();
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!isMounted) return;
+      setAuthUser(session?.user ?? null);
+      setIsAuthLoading(false);
+    });
+
+    return () => {
+      isMounted = false;
+      subscription.unsubscribe();
+    };
+  }, [supabase]);
+
+  const handleAutoRetryChange = (value: AutoRetryPreference) => {
+    if (value === "enabled") {
+      enableAutoRetry();
+      return;
+    }
+    if (value === "disabled") {
+      disableAutoRetry();
+      return;
+    }
+    resetAutoRetryPreference();
+  };
+
+  const searchSourceLabels: Record<PreferredSearchSource, string> = {
+    mixed: getSourceLabel("mixed"),
+    youtube: getSourceLabel("youtube"),
+    youtubemusic: getSourceLabel("youtubemusic"),
+    soundcloud: getSourceLabel("soundcloud"),
+    jiosaavn: getSourceLabel("jiosaavn"),
+    itunes: getSourceLabel("itunes"),
+    deezer: getSourceLabel("deezer"),
+  };
+  const themeLabels: Record<AppTheme, string> = {
+    default: getThemeLabel("default"),
+    ocean: getThemeLabel("ocean"),
+    amethyst: getThemeLabel("amethyst"),
+    sunset: getThemeLabel("sunset"),
+    forest: getThemeLabel("forest"),
+    rose: getThemeLabel("rose"),
+    frost: getThemeLabel("frost"),
+    midnight: getThemeLabel("midnight"),
+    ember: getThemeLabel("ember"),
+    aurora: getThemeLabel("aurora"),
+    sapphire: getThemeLabel("sapphire"),
+    violet: getThemeLabel("violet"),
+    copper: getThemeLabel("copper"),
+    graphite: getThemeLabel("graphite"),
+    lagoon: getThemeLabel("lagoon"),
+    ruby: getThemeLabel("ruby"),
+    olive: getThemeLabel("olive"),
+    starlight: getThemeLabel("starlight"),
+    dawn: getThemeLabel("dawn"),
+    mist: getThemeLabel("mist"),
+    petal: getThemeLabel("petal"),
+    meadow: getThemeLabel("meadow"),
+    daybreak: getThemeLabel("daybreak"),
+    linen: getThemeLabel("linen"),
+    sky: getThemeLabel("sky"),
+    lavender: getThemeLabel("lavender"),
+    peach: getThemeLabel("peach"),
+    mint: getThemeLabel("mint"),
+    butter: getThemeLabel("butter"),
+    sage: getThemeLabel("sage"),
+    ice: getThemeLabel("ice"),
+    sand: getThemeLabel("sand"),
+    blush: getThemeLabel("blush"),
+  };
+  const themeOptions: Array<{
+    value: AppTheme;
+    label: string;
+    preview: [string, string, string];
+  }> = [
+    {
+      value: "default",
+      label: themeLabels.default,
+      preview: ["#1ed760", "#181818", "#131313"],
+    },
+    {
+      value: "ocean",
+      label: themeLabels.ocean,
+      preview: ["#5cc8ff", "#102235", "#0c1b2b"],
+    },
+    {
+      value: "amethyst",
+      label: themeLabels.amethyst,
+      preview: ["#c084fc", "#241439", "#1b102c"],
+    },
+    {
+      value: "sunset",
+      label: themeLabels.sunset,
+      preview: ["#ff9153", "#2a1610", "#21110d"],
+    },
+    {
+      value: "forest",
+      label: themeLabels.forest,
+      preview: ["#4ade80", "#112219", "#0d1a13"],
+    },
+    {
+      value: "rose",
+      label: themeLabels.rose,
+      preview: ["#fb7185", "#2a1220", "#210e18"],
+    },
+    {
+      value: "frost",
+      label: themeLabels.frost,
+      preview: ["#67e8f9", "#10212a", "#0b1a22"],
+    },
+    {
+      value: "midnight",
+      label: themeLabels.midnight,
+      preview: ["#818cf8", "#0e1330", "#0a1027"],
+    },
+    {
+      value: "ember",
+      label: themeLabels.ember,
+      preview: ["#fb923c", "#28150f", "#1e100b"],
+    },
+    {
+      value: "aurora",
+      label: themeLabels.aurora,
+      preview: ["#2dd4bf", "#0e241d", "#0a1c16"],
+    },
+    {
+      value: "sapphire",
+      label: themeLabels.sapphire,
+      preview: ["#60a5fa", "#0f2035", "#0a182a"],
+    },
+    {
+      value: "violet",
+      label: themeLabels.violet,
+      preview: ["#d8b4fe", "#241136", "#1a0d29"],
+    },
+    {
+      value: "copper",
+      label: themeLabels.copper,
+      preview: ["#d97757", "#2a1711", "#1f110d"],
+    },
+    {
+      value: "graphite",
+      label: themeLabels.graphite,
+      preview: ["#94a3b8", "#151922", "#10141c"],
+    },
+    {
+      value: "lagoon",
+      label: themeLabels.lagoon,
+      preview: ["#22d3ee", "#0d2628", "#091d1f"],
+    },
+    {
+      value: "ruby",
+      label: themeLabels.ruby,
+      preview: ["#f43f5e", "#2b121a", "#210d14"],
+    },
+    {
+      value: "olive",
+      label: themeLabels.olive,
+      preview: ["#a3e635", "#212813", "#181d0e"],
+    },
+    {
+      value: "starlight",
+      label: themeLabels.starlight,
+      preview: ["#a5b4fc", "#161a34", "#101327"],
+    },
+    {
+      value: "dawn",
+      label: themeLabels.dawn,
+      preview: ["#ff8a5b", "#fff7f1", "#ffe3d5"],
+    },
+    {
+      value: "mist",
+      label: themeLabels.mist,
+      preview: ["#60a5fa", "#f4f8ff", "#dde8ff"],
+    },
+    {
+      value: "petal",
+      label: themeLabels.petal,
+      preview: ["#fb7185", "#fff6fa", "#ffd9e3"],
+    },
+    {
+      value: "meadow",
+      label: themeLabels.meadow,
+      preview: ["#22c55e", "#f5fff7", "#d9f7df"],
+    },
+    {
+      value: "daybreak",
+      label: themeLabels.daybreak,
+      preview: ["#8b5cf6", "#f7f6ff", "#e4defe"],
+    },
+    {
+      value: "linen",
+      label: themeLabels.linen,
+      preview: ["#c08457", "#fffdfa", "#f4eadf"],
+    },
+    {
+      value: "sky",
+      label: themeLabels.sky,
+      preview: ["#0ea5e9", "#f6fbff", "#dcefff"],
+    },
+    {
+      value: "lavender",
+      label: themeLabels.lavender,
+      preview: ["#a78bfa", "#fbf9ff", "#ebe4ff"],
+    },
+    {
+      value: "peach",
+      label: themeLabels.peach,
+      preview: ["#fb923c", "#fff8f2", "#ffe2cc"],
+    },
+    {
+      value: "mint",
+      label: themeLabels.mint,
+      preview: ["#10b981", "#f5fffb", "#d9f7ec"],
+    },
+    {
+      value: "butter",
+      label: themeLabels.butter,
+      preview: ["#f59e0b", "#fffdf2", "#fff4c7"],
+    },
+    {
+      value: "sage",
+      label: themeLabels.sage,
+      preview: ["#22c55e", "#f7fbf7", "#e3f0e2"],
+    },
+    {
+      value: "ice",
+      label: themeLabels.ice,
+      preview: ["#06b6d4", "#f3feff", "#d4f7fb"],
+    },
+    {
+      value: "sand",
+      label: themeLabels.sand,
+      preview: ["#d97706", "#fffaf3", "#f5eadb"],
+    },
+    {
+      value: "blush",
+      label: themeLabels.blush,
+      preview: ["#f43f5e", "#fff6f8", "#ffe0e8"],
+    },
+  ];
+  const languageLabels: Record<AppLanguage, string> = {
+    en: t("language.english"),
+    fa: t("language.persian"),
+  };
+
+  const autoRetryLabel =
+    autoRetryPreference === "enabled"
+      ? t("settings.alwaysRetryOnce")
+      : autoRetryPreference === "disabled"
+      ? t("settings.neverRetryAutomatically")
+      : t("settings.askWhenPlaybackFails");
+  const motionLabel = settings.disableAnimations
+    ? t("settings.animationsOff")
+    : t("settings.animationsOn");
+  const searchMemoryLabel = settings.rememberLastSearch
+    ? t("settings.searchMemoryOn")
+    : t("settings.searchMemoryOff");
+  const accountAvatarUrl = getUserAvatarUrl(authUser);
+  const accountDisplayName = getUserDisplayName(authUser);
+  const accountProviderLabel = authUser
+    ? hasUserProvider(authUser, "google")
+      ? t("settings.googleAccount")
+      : t("settings.emailAccount")
+    : t("settings.accountGuest");
+
+  const handleSignOut = async () => {
+    if (!supabase) {
+      showToast({
+        tone: "error",
+        message: cloudSyncUnavailableMessage,
+      });
+      return;
+    }
+
+    const { error } = await supabase.auth.signOut();
+    if (error) {
+      showToast({
+        tone: "error",
+        message: error.message,
+      });
+      return;
+    }
+
+    showToast({
+      tone: "success",
+      message: t("settings.accountSignedOut"),
+    });
+  };
+
+  const handleSyncLibrary = async () => {
+    if (!supabase) {
+      showToast({
+        tone: "error",
+        message: cloudSyncUnavailableMessage,
+      });
+      return;
+    }
+
+    setIsSyncing(true);
+    showToast({
+      message: t("settings.syncInProgress"),
+      tone: "loading",
+      durationMs: 0,
+    });
+
+    try {
+      const payload = await syncCloudLibrarySnapshot();
+
+      if (
+        payload.source === "empty" &&
+        payload.syncedPlaylists === 0 &&
+        payload.syncedLikes === 0
+      ) {
+        showToast({
+          tone: "error",
+          message: t("settings.syncEmpty"),
+        });
+        return;
+      }
+
+      showToast({
+        tone: "success",
+        message: t("settings.syncSuccess", {
+          playlists: payload.syncedPlaylists ?? 0,
+          likes: payload.syncedLikes ?? 0,
+        }),
+      });
+    } catch (error) {
+      showToast({
+        tone: "error",
+        message:
+          error instanceof Error ? error.message : t("settings.syncFailed"),
+      });
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  return (
+    <div className="relative h-full overflow-y-auto hide-scrollbar rounded-xl bg-transparent text-[color:var(--foreground)]">
+      <div className="relative space-y-5 bg-transparent">
+        <section className="theme-surface overflow-hidden rounded-xl border p-5  md:p-6">
+          <div className="flex flex-col gap-6 xl:flex-row xl:items-end xl:justify-between">
+            <div className="max-w-3xl">
+              <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/20 px-3 py-1 text-xs font-semibold uppercase tracking-[0.22em] text-white/58">
+                <SparkGlyph />
+                {t("settings.personalize")}
+              </div>
+              <h1 className="mt-4 text-4xl font-black tracking-tight text-white md:text-5xl">
+                {t("settings.title")}
+              </h1>
+              <p className="mt-3 max-w-2xl text-sm text-white/64 md:text-base">
+                {t("settings.description")}
+              </p>
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <span className="rounded-full border border-white/10 bg-black/20 px-3 py-2 text-xs font-medium uppercase tracking-[0.18em] text-white/52">
+                {t("settings.autoRetry")}: {autoRetryLabel}
+              </span>
+              <span className="rounded-full border border-white/10 bg-black/20 px-3 py-2 text-xs font-medium uppercase tracking-[0.18em] text-white/52">
+                {t("settings.searchLabel")}:{" "}
+                {searchSourceLabels[settings.preferredSearchSource]}
+              </span>
+              <span className="rounded-full border border-white/10 bg-black/20 px-3 py-2 text-xs font-medium uppercase tracking-[0.18em] text-white/52">
+                {t("settings.seekJump")}: {settings.seekStepSeconds}s
+              </span>
+              <span className="rounded-full border border-white/10 bg-black/20 px-3 py-2 text-xs font-medium uppercase tracking-[0.18em] text-white/52">
+                {t("settings.theme")}: {themeLabels[settings.theme]}
+              </span>
+              <span className="rounded-full border border-white/10 bg-black/20 px-3 py-2 text-xs font-medium uppercase tracking-[0.18em] text-white/52">
+                {t("settings.motion")}: {motionLabel}
+              </span>
+              <span className="rounded-full border border-white/10 bg-black/20 px-3 py-2 text-xs font-medium uppercase tracking-[0.18em] text-white/52">
+                {t("settings.searchMemory")}: {searchMemoryLabel}
+              </span>
+            </div>
+          </div>
+        </section>
+
+        <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_320px]">
+          <div className="space-y-5">
+            <Section
+              eyebrow={t("settings.appearance")}
+              title={t("settings.themeAndMotion")}
+              description={t("settings.themeAndMotionDescription")}
+            >
+              <SettingRow
+                label={t("settings.theme")}
+                description={t("settings.themeDescription")}
+                layout="stacked"
+                control={
+                  <div className="grid grid-cols-1 gap-2 min-[480px]:grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
+                    {themeOptions.map(({ value, label, preview }) => (
+                      <ThemeChoiceCard
+                        key={value}
+                        label={label}
+                        preview={preview}
+                        selected={settings.theme === value}
+                        onClick={() => updateSettings({ theme: value })}
+                      />
+                    ))}
+                  </div>
+                }
+              />
+              <SettingRow
+                label={t("settings.disableAnimations")}
+                description={t("settings.disableAnimationsDescription")}
+                control={
+                  <Toggle
+                    enabled={settings.disableAnimations}
+                    onClick={() =>
+                      updateSettings({
+                        disableAnimations: !settings.disableAnimations,
+                      })
+                    }
+                  />
+                }
+              />
+              <SettingRow
+                label={t("settings.language")}
+                description={t("settings.languageDescription")}
+                control={
+                  <div className="flex flex-wrap gap-2">
+                    {(
+                      Object.entries(languageLabels) as Array<
+                        [AppLanguage, string]
+                      >
+                    ).map(([value, label]) => (
+                      <ChoiceChip
+                        key={value}
+                        label={label}
+                        selected={settings.language === value}
+                        onClick={() => updateSettings({ language: value })}
+                      />
+                    ))}
+                  </div>
+                }
+              />
+            </Section>
+
+            <Section
+              eyebrow={t("settings.playback")}
+              title={t("settings.musicBehaves")}
+              description={t("settings.musicBehavesDescription")}
+            >
+              <SettingRow
+                label={t("settings.autoRetryPlayback")}
+                description={t("settings.autoRetryPlaybackDescription")}
+                control={
+                  <AutoRetryValue
+                    currentValue={autoRetryPreference}
+                    onChange={handleAutoRetryChange}
+                    labels={{
+                      ask: t("settings.askMe"),
+                      always: t("settings.alwaysRetry"),
+                      never: t("settings.neverRetry"),
+                    }}
+                  />
+                }
+              />
+              <SettingRow
+                label={t("settings.autoplayRecommendedTracks")}
+                description={t("settings.autoplayRecommendedTracksDescription")}
+                control={
+                  <Toggle
+                    enabled={settings.autoplayRecommendations}
+                    onClick={() =>
+                      updateSettings({
+                        autoplayRecommendations:
+                          !settings.autoplayRecommendations,
+                      })
+                    }
+                  />
+                }
+              />
+              <SettingRow
+                label={t("settings.openNowPlayingAutomatically")}
+                description={t(
+                  "settings.openNowPlayingAutomaticallyDescription"
+                )}
+                control={
+                  <Toggle
+                    enabled={settings.openFullscreenOnPlay}
+                    onClick={() =>
+                      updateSettings({
+                        openFullscreenOnPlay: !settings.openFullscreenOnPlay,
+                      })
+                    }
+                  />
+                }
+              />
+            </Section>
+
+            <Section
+              eyebrow={t("settings.discovery")}
+              title={t("settings.searchPreferences")}
+              description={t("settings.searchPreferencesDescription")}
+            >
+              <SettingRow
+                label={t("settings.defaultSearchSource")}
+                description={t("settings.defaultSearchSourceDescription")}
+                control={
+                  <div className="flex flex-wrap gap-2">
+                    {(
+                      Object.entries(searchSourceLabels) as Array<
+                        [PreferredSearchSource, string]
+                      >
+                    ).map(([value, label]) => (
+                      <ChoiceChip
+                        key={value}
+                        label={label}
+                        selected={settings.preferredSearchSource === value}
+                        onClick={() =>
+                          updateSettings({ preferredSearchSource: value })
+                        }
+                      />
+                    ))}
+                  </div>
+                }
+              />
+              <SettingRow
+                label={t("settings.rememberLastSearch")}
+                description={t("settings.rememberLastSearchDescription")}
+                control={
+                  <Toggle
+                    enabled={settings.rememberLastSearch}
+                    onClick={() =>
+                      updateSettings({
+                        rememberLastSearch: !settings.rememberLastSearch,
+                      })
+                    }
+                  />
+                }
+              />
+            </Section>
+
+            <Section
+              eyebrow={t("settings.lyricsAndControls")}
+              title={t("settings.readingAndInput")}
+              description={t("settings.readingAndInputDescription")}
+            >
+              <SettingRow
+                label={t("settings.lyrics")}
+                description={t("settings.lyricsDescription")}
+                control={
+                  <Toggle
+                    enabled={settings.lyricsEnabled}
+                    onClick={() =>
+                      updateSettings({
+                        lyricsEnabled: !settings.lyricsEnabled,
+                      })
+                    }
+                  />
+                }
+              />
+              <SettingRow
+                label={t("settings.autoScrollSyncedLyrics")}
+                description={t("settings.autoScrollSyncedLyricsDescription")}
+                control={
+                  <Toggle
+                    enabled={settings.autoScrollLyrics}
+                    disabled={!settings.lyricsEnabled}
+                    onClick={() =>
+                      updateSettings({
+                        autoScrollLyrics: !settings.autoScrollLyrics,
+                      })
+                    }
+                  />
+                }
+              />
+              <SettingRow
+                label={t("settings.keyboardShortcuts")}
+                description={t("settings.keyboardShortcutsDescription")}
+                control={
+                  <Toggle
+                    enabled={settings.keyboardShortcuts}
+                    onClick={() =>
+                      updateSettings({
+                        keyboardShortcuts: !settings.keyboardShortcuts,
+                      })
+                    }
+                  />
+                }
+              />
+              <SettingRow
+                label={t("settings.seekJumpLength")}
+                description={t("settings.seekJumpLengthDescription")}
+                control={
+                  <div className="flex flex-wrap gap-2">
+                    {SEEK_STEP_OPTIONS.map((seconds) => (
+                      <ChoiceChip
+                        key={seconds}
+                        label={`${seconds}s`}
+                        selected={settings.seekStepSeconds === seconds}
+                        onClick={() =>
+                          updateSettings({ seekStepSeconds: seconds })
+                        }
+                      />
+                    ))}
+                  </div>
+                }
+              />
+            </Section>
+          </div>
+
+          <aside className="space-y-5 xl:sticky xl:top-0 xl:self-start">
+            <section className="theme-surface-strong rounded-xl border p-5">
+              <p className="text-xs font-semibold uppercase tracking-[0.22em] text-[color:color-mix(in_srgb,var(--foreground)_42%,transparent)]">
+                {t("settings.account")}
+              </p>
+              <div className="mt-4 space-y-4">
+                <div className="theme-surface-soft rounded-xl border p-4">
+                  <p className="text-sm text-[color:color-mix(in_srgb,var(--foreground)_45%,transparent)]">
+                    {t("settings.accountDescription")}
+                  </p>
+                  <div className="mt-3 flex items-center gap-3">
+                    {accountAvatarUrl ? (
+                      <img
+                        src={accountAvatarUrl}
+                        alt=""
+                        className="h-11 w-11 rounded-full object-cover"
+                      />
+                    ) : (
+                      <div className="theme-button-soft flex h-11 w-11 items-center justify-center rounded-full border text-sm font-semibold">
+                        {accountDisplayName.slice(0, 1).toUpperCase() ||
+                          authUser?.email?.slice(0, 1).toUpperCase() ||
+                          "G"}
+                      </div>
+                    )}
+                    <div className="min-w-0">
+                      <p className="truncate text-base font-semibold text-[color:var(--foreground)]">
+                        {isAuthLoading
+                          ? t("settings.accountLoading")
+                          : accountDisplayName || t("settings.accountGuest")}
+                      </p>
+                      <p className="theme-muted mt-1 text-sm">
+                        {accountProviderLabel}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="theme-surface-soft rounded-xl border p-4">
+                  <p className="text-sm text-[color:color-mix(in_srgb,var(--foreground)_45%,transparent)]">
+                    {t("settings.cloudSync")}
+                  </p>
+                  <p className="theme-muted mt-1 text-sm">
+                    {isCloudSyncAvailable
+                      ? t("settings.cloudSyncDescription")
+                      : cloudSyncUnavailableMessage}
+                  </p>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {!isCloudSyncAvailable ? (
+                      <>
+                        <button
+                          type="button"
+                          disabled
+                          className="theme-button-solid rounded-full px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {t("settings.syncLibrary")}
+                        </button>
+                        <button
+                          type="button"
+                          disabled
+                          className="theme-button-soft rounded-full border px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {t("settings.signOut")}
+                        </button>
+                      </>
+                    ) : authUser ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void handleSyncLibrary();
+                          }}
+                          disabled={isSyncing}
+                          className="theme-button-solid rounded-full px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {t("settings.syncLibrary")}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void handleSignOut();
+                          }}
+                          className="theme-button-soft rounded-full border px-4 py-2 text-sm font-semibold transition"
+                        >
+                          {t("settings.signOut")}
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <Link
+                          href="/signin"
+                          className="theme-button-solid rounded-full px-4 py-2 text-sm font-semibold transition"
+                        >
+                          {t("settings.continueToSignIn")}
+                        </Link>
+                        <Link
+                          href="/signup"
+                          className="theme-button-soft rounded-full border px-4 py-2 text-sm font-semibold transition"
+                        >
+                          {t("settings.continueToSignUp")}
+                        </Link>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section className="theme-surface-strong rounded-xl border p-5">
+              <p className="text-xs font-semibold uppercase tracking-[0.22em] text-[color:color-mix(in_srgb,var(--foreground)_42%,transparent)]">
+                {t("settings.activeSetup")}
+              </p>
+              <div className="mt-4 space-y-3">
+                <div className="theme-surface-soft rounded-xl border p-4">
+                  <p className="text-sm text-[color:color-mix(in_srgb,var(--foreground)_45%,transparent)]">
+                    {t("settings.playbackSummary")}
+                  </p>
+                  <p className="mt-1 text-base font-semibold text-[color:var(--foreground)]">
+                    {autoRetryLabel}
+                  </p>
+                  <p className="theme-muted mt-1 text-sm">
+                    {settings.autoplayRecommendations
+                      ? t("settings.recommendationsContinue")
+                      : t("settings.playbackStops")}
+                  </p>
+                </div>
+                <div className="theme-surface-soft rounded-xl border p-4">
+                  <p className="text-sm text-[color:color-mix(in_srgb,var(--foreground)_45%,transparent)]">
+                    {t("settings.searchSummary")}
+                  </p>
+                  <p className="mt-1 text-base font-semibold text-[color:var(--foreground)]">
+                    {searchSourceLabels[settings.preferredSearchSource]}
+                  </p>
+                  <p className="theme-muted mt-1 text-sm">
+                    {settings.rememberLastSearch
+                      ? t("settings.searchRestores")
+                      : t("settings.searchOpensFresh")}
+                  </p>
+                </div>
+                <div className="theme-surface-soft rounded-xl border p-4">
+                  <p className="text-sm text-[color:color-mix(in_srgb,var(--foreground)_45%,transparent)]">
+                    {t("settings.lyricsControlsSummary")}
+                  </p>
+                  <p className="mt-1 text-base font-semibold text-[color:var(--foreground)]">
+                    {settings.lyricsEnabled
+                      ? t("settings.lyricsOn")
+                      : t("settings.lyricsOff")}
+                  </p>
+                  <p className="theme-muted mt-1 text-sm">
+                    {settings.keyboardShortcuts
+                      ? t("settings.shortcutsEnabled", {
+                          seconds: settings.seekStepSeconds,
+                        })
+                      : t("settings.shortcutsDisabled")}
+                  </p>
+                </div>
+                <div className="theme-surface-soft rounded-xl border p-4">
+                  <p className="text-sm text-[color:color-mix(in_srgb,var(--foreground)_45%,transparent)]">
+                    {t("settings.appearancePerformance")}
+                  </p>
+                  <p className="mt-1 text-base font-semibold text-[color:var(--foreground)]">
+                    {themeLabels[settings.theme]}
+                  </p>
+                  <p className="theme-muted mt-1 text-sm">{motionLabel}</p>
+                </div>
+              </div>
+            </section>
+
+            <section className="theme-surface-strong rounded-xl border p-5">
+              <p className="text-xs font-semibold uppercase tracking-[0.22em] text-[color:color-mix(in_srgb,var(--foreground)_42%,transparent)]">
+                {t("settings.quickHelp")}
+              </p>
+              <div className="theme-muted mt-4 space-y-3 text-sm">
+                <p>{t("settings.quickHelpShortcuts")}</p>
+                <p>{t("settings.quickHelpLyrics")}</p>
+                <p>{t("settings.quickHelpThemes")}</p>
+                <p>{t("settings.quickHelpReset")}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  resetSettings();
+                  resetAutoRetryPreference();
+                }}
+                className="theme-button-soft mt-5 w-full rounded-full border px-4 py-3 text-sm font-semibold transition"
+              >
+                {t("settings.resetDefaults")}
+              </button>
+            </section>
+
+            <section className="theme-surface-strong rounded-xl border p-5">
+              <p className="text-xs font-semibold uppercase tracking-[0.22em] text-[color:color-mix(in_srgb,var(--foreground)_42%,transparent)]">
+                {t("settings.community")}
+              </p>
+              <div className="mt-4 flex flex-wrap items-start justify-center gap-4">
+                <a
+                  href="https://t.me/StreamifyPlayer"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="group flex w-24 flex-col items-center gap-2"
+                >
+                  <span className="flex h-12 w-12 items-center justify-center rounded-full border bg-[color:color-mix(in_srgb,var(--theme-accent)_14%,transparent)] text-[color:var(--theme-accent)] transition group-hover:brightness-[1.15]">
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="currentColor"
+                      className="h-5 w-5"
+                      aria-hidden="true"
+                    >
+                      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 00-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.95-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.74-.55 2.92-1.27 4.86-2.11 5.83-2.51 2.78-1.16 3.35-1.36 3.73-1.36.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .38z" />
+                    </svg>
+                  </span>
+                  <span className="theme-muted text-xs font-semibold">
+                    {t("settings.communityTelegram")}
+                  </span>
+                </a>
+                <a
+                  href="https://github.com/ErfanBagheri404/streamifyweb-player"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="group flex w-24 flex-col items-center gap-2"
+                >
+                  <span className="flex h-12 w-12 items-center justify-center rounded-full border bg-[color:color-mix(in_srgb,var(--theme-accent)_14%,transparent)] text-[color:var(--theme-accent)] transition group-hover:brightness-[1.15]">
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="currentColor"
+                      className="h-5 w-5"
+                      aria-hidden="true"
+                    >
+                      <path d="M12 2C6.48 2 2 6.48 2 12c0 4.42 2.87 8.17 6.84 9.5.5.08.66-.23.66-.5 0-.24-.01-.88-.01-1.72-2.78.62-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.9-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.9 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.63-1.34-2.22-.26-4.56-1.11-4.56-4.95 0-1.09.39-1.99 1.03-2.69-.1-.26-.45-1.28.1-2.65 0 0 .84-.27 2.75 1.02a9.36 9.36 0 015 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.37.2 2.39.1 2.65.64.7 1.03 1.6 1.03 2.69 0 3.85-2.34 4.68-4.57 4.94.36.31.68.92.68 1.85 0 1.34-.01 2.42-.01 2.75 0 .28.16.59.67.49A10.02 10.02 0 0022 12c0-5.52-4.48-10-10-10z" />
+                    </svg>
+                  </span>
+                  <span className="theme-muted text-xs font-semibold">
+                    {t("settings.communityGithub")}
+                  </span>
+                </a>
+              </div>
+            </section>
+          </aside>
+        </div>
+      </div>
+    </div>
+  );
+}

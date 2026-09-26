@@ -1,0 +1,1750 @@
+import { NextRequest, NextResponse } from "next/server";
+import { requireStreamifyRequest } from "../_lib/request-guard";
+import {
+  getInvidiousInstances,
+  getPipedInstances,
+} from "../../lib/media-providers";
+import {
+  buildProviderUrlCandidates,
+  getProviderEndpoints,
+} from "../../lib/provider-endpoints";
+import {
+  extractYouTubeVideoId,
+  normalizeYouTubeThumbnailUrl,
+} from "../../lib/youtube-thumbnails";
+
+const USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
+
+type SearchResponse = { items: unknown[]; nextpage?: string | null };
+type ExternalCatalogTrack = {
+  provider: "itunes" | "deezer";
+  id: string;
+  title: string;
+  artist: string;
+  coverUrl?: string;
+  duration?: number;
+  album?: string;
+};
+
+type JioSaavnPlaybackMatch = {
+  item: Record<string, unknown>;
+  id: string;
+  url?: string;
+  title: string;
+  artist: string;
+  duration?: number;
+};
+
+function reportDebugEvent(
+  _runId: string,
+  _hypothesisId: string,
+  _location: string,
+  _msg: string,
+  _data: Record<string, unknown>,
+) {}
+
+function withTimeout(signal: AbortSignal | undefined, ms: number): AbortSignal {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else
+      signal.addEventListener("abort", () => controller.abort(), {
+        once: true,
+      });
+  }
+
+  controller.signal.addEventListener(
+    "abort",
+    () => {
+      clearTimeout(timer);
+    },
+    { once: true },
+  );
+
+  return controller.signal;
+}
+
+function toRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function toArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function toNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+function extractJsonObjectFromText(value: string): Record<string, unknown> {
+  const trimmed = value.trim();
+  const startIndex = trimmed.indexOf("{");
+  if (startIndex < 0) {
+    throw new Error("Expected JSON object in fallback response");
+  }
+
+  const parsed = JSON.parse(trimmed.slice(startIndex)) as unknown;
+  return toRecord(parsed);
+}
+
+async function fetchDeezerPayload(
+  query: string,
+  limit: number,
+  signal: AbortSignal,
+  deezerApiBase: string,
+  deezerFallbackPrefix: string,
+): Promise<Record<string, unknown>> {
+  const directUrl = new URL(deezerApiBase);
+  directUrl.searchParams.set("q", query);
+  directUrl.searchParams.set("limit", String(limit));
+
+  try {
+    const response = await fetch(directUrl.toString(), {
+      headers: {
+        Accept: "application/json",
+        "User-Agent": USER_AGENT,
+      },
+      cache: "no-store",
+      signal,
+    });
+    if (!response.ok) {
+      throw new Error(`Deezer HTTP ${response.status}`);
+    }
+
+    return toRecord(await response.json());
+  } catch (error) {
+    const fallbackPath = `${new URL(directUrl.toString()).pathname}${
+      new URL(directUrl.toString()).search
+    }`;
+    const fallbackUrl = `${deezerFallbackPrefix}${fallbackPath}`;
+    const fallbackResponse = await fetch(fallbackUrl, {
+      headers: {
+        Accept: "text/plain",
+        "User-Agent": USER_AGENT,
+      },
+      cache: "no-store",
+      signal,
+    });
+    if (!fallbackResponse.ok) {
+      throw error instanceof Error
+        ? error
+        : new Error(`Deezer fallback HTTP ${fallbackResponse.status}`);
+    }
+
+    return extractJsonObjectFromText(await fallbackResponse.text());
+  }
+}
+
+function normalizeBaseUrl(value: string): string {
+  return value.replace(/\/+$/, "");
+}
+
+function getBackendBaseUrl(requestOrigin: string): string | null {
+  // Disable backend proxying on Vercel - use local API routes instead
+  if (process.env.VERCEL === "1" || process.env.NODE_ENV === "production") {
+    return null;
+  }
+
+  const fromEnv =
+    process.env.EXPRESS_API_URL ||
+    process.env.SEARCH_API_BASE_URL ||
+    process.env.NEXT_PUBLIC_API_BASE_URL;
+
+  if (!fromEnv) return null;
+
+  const normalized = normalizeBaseUrl(fromEnv);
+  if (normalized === requestOrigin) return null;
+
+  return normalized;
+}
+
+function mapFilterToInvidiousType(filter: string): string | null {
+  const f = (filter || "").toLowerCase();
+  if (!f || f === "all") return null;
+  if (f === "videos" || f === "video") return "video";
+  if (f === "playlists" || f === "playlist") return "playlist";
+  if (f === "channels" || f === "channel" || f === "artists" || f === "artist")
+    return "channel";
+  return null;
+}
+
+function musicFilterMap(filter: string): string {
+  const map: Record<string, string> = {
+    songs: "music_songs",
+    videos: "music_videos",
+    albums: "music_albums",
+    playlists: "music_playlists",
+    channels: "music_artists",
+    "": "music_songs",
+  };
+  return map[filter] || filter;
+}
+
+function absolutizeUrl(url: string, base: string): string {
+  if (!url) return url;
+  if (url.startsWith("https://") || url.startsWith("http://")) return url;
+  if (url.startsWith("//")) return `https:${url}`;
+  if (url.startsWith("/")) return `${base}${url}`;
+  return url;
+}
+
+function upgradeSoundCloudImage(url: string): string {
+  if (!url) return "";
+
+  return url
+    .replace("-large.", "-t500x500.")
+    .replace("large.jpg", "t500x500.jpg")
+    .replace("large.png", "t500x500.png");
+}
+
+function clampCatalogLimit(value: number | undefined): number {
+  if (!value || !Number.isFinite(value)) return 20;
+  return Math.max(1, Math.min(25, Math.round(value)));
+}
+
+function normalizeComparisonText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/\[[^\]]*\]/g, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function scoreWordOverlap(
+  expected: string,
+  actual: string,
+  weight: number,
+): number {
+  const expectedWords = normalizeComparisonText(expected)
+    .split(" ")
+    .filter(Boolean);
+  const actualWords = new Set(
+    normalizeComparisonText(actual).split(" ").filter(Boolean),
+  );
+  if (expectedWords.length === 0 || actualWords.size === 0) return 0;
+
+  let matches = 0;
+  for (const word of expectedWords) {
+    if (actualWords.has(word)) matches += 1;
+  }
+
+  return matches * weight;
+}
+
+function scoreTextMatch(expected: string, actual: string): number {
+  const normalizedExpected = normalizeComparisonText(expected);
+  const normalizedActual = normalizeComparisonText(actual);
+  if (!normalizedExpected || !normalizedActual) return 0;
+  if (normalizedExpected === normalizedActual) return 120;
+  if (
+    normalizedExpected.includes(normalizedActual) ||
+    normalizedActual.includes(normalizedExpected)
+  ) {
+    return 80;
+  }
+
+  return scoreWordOverlap(expected, actual, 18);
+}
+
+function scoreArtistMatch(expected: string, actual: string): number {
+  const normalizedExpected = normalizeComparisonText(expected);
+  const normalizedActual = normalizeComparisonText(actual);
+  if (!normalizedExpected || !normalizedActual) return 0;
+  if (normalizedExpected === normalizedActual) return 70;
+  if (
+    normalizedExpected.includes(normalizedActual) ||
+    normalizedActual.includes(normalizedExpected)
+  ) {
+    return 42;
+  }
+
+  return scoreWordOverlap(expected, actual, 10);
+}
+
+function extractItemTitle(item: Record<string, unknown>): string {
+  for (const candidate of [item.title, item.song, item.name]) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  return "";
+}
+
+function extractItemArtist(item: Record<string, unknown>): string {
+  for (const candidate of [
+    item.primaryArtists,
+    item.primary_artists,
+    item.artist,
+    item.singers,
+    item.subtitle,
+    item.description,
+  ]) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+
+  const artistsRecord = toRecord(item.artists);
+  const primaryArtists = toArray(artistsRecord.primary)
+    .map((entry) => {
+      const record = toRecord(entry);
+      return typeof record.name === "string" ? record.name.trim() : "";
+    })
+    .filter(Boolean);
+  return primaryArtists.join(", ");
+}
+
+function extractItemId(item: Record<string, unknown>): string {
+  const rawId = item.id ?? item.videoId ?? item.identifier;
+  if (typeof rawId === "string" && rawId.trim()) return rawId.trim();
+  if (typeof rawId === "number" && Number.isFinite(rawId)) return String(rawId);
+  return "";
+}
+
+function extractItemUrl(item: Record<string, unknown>): string | undefined {
+  for (const candidate of [item.url, item.permalink_url]) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  return undefined;
+}
+
+function extractItemDuration(
+  item: Record<string, unknown>,
+): number | undefined {
+  const numeric = toNumber(item.duration);
+  if (numeric == null) return undefined;
+  return numeric > 10000 ? Math.round(numeric / 1000) : Math.round(numeric);
+}
+
+function extractSongResults(payload: unknown): Array<Record<string, unknown>> {
+  const record = toRecord(payload);
+  const data = toRecord(record.data);
+  const songs = toRecord(data.songs);
+
+  const directSongResults = toArray(songs.results).map((entry) =>
+    toRecord(entry),
+  );
+  if (directSongResults.length > 0) return directSongResults;
+
+  const dataResults = toArray(data.results).map((entry) => toRecord(entry));
+  if (dataResults.length > 0) return dataResults;
+
+  const topLevelResults = toArray(record.results).map((entry) =>
+    toRecord(entry),
+  );
+  if (topLevelResults.length > 0) return topLevelResults;
+
+  return toArray(payload).map((entry) => toRecord(entry));
+}
+
+function isStrongEnoughMatch(
+  score: number,
+  track: ExternalCatalogTrack,
+): boolean {
+  return score >= (track.artist.trim() ? 80 : 60);
+}
+
+function normalizeImageArray(
+  coverUrl: string | undefined,
+  fallback: unknown,
+): Array<Record<string, unknown>> {
+  const images = toArray(fallback)
+    .map((entry) => toRecord(entry))
+    .filter((entry) => typeof entry.url === "string" && entry.url.trim());
+  const normalizedCover = coverUrl?.trim() || "";
+  if (!normalizedCover) return images;
+
+  return [
+    {
+      quality: "500x500",
+      width: 500,
+      height: 500,
+      url: normalizedCover,
+    },
+    ...images.filter((entry) => entry.url !== normalizedCover),
+  ];
+}
+
+function bestImageUrl(images: Array<Record<string, unknown>>): string {
+  for (const image of images) {
+    if (typeof image.url === "string" && image.url.trim()) {
+      return image.url;
+    }
+  }
+  return "";
+}
+
+async function findJioSaavnPlayback(
+  track: ExternalCatalogTrack,
+  signal: AbortSignal | undefined,
+): Promise<JioSaavnPlaybackMatch | null> {
+  const query = [track.title, track.artist].filter(Boolean).join(" ").trim();
+  if (!query) return null;
+
+  const endpoints = await getProviderEndpoints();
+  const candidates = [
+    ...buildProviderUrlCandidates(
+      endpoints.providers.jiosaavn.apiBase,
+      ["/api/search", "/search"],
+      { query },
+    ),
+    ...buildProviderUrlCandidates(
+      endpoints.providers.jiosaavn.fallbackSearchBase,
+      ["/api/search", "/search"],
+      { query },
+    ),
+  ];
+
+  for (const apiUrl of candidates) {
+    try {
+      const response = await fetch(apiUrl, {
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+        signal: withTimeout(signal, 9000),
+      });
+      if (!response.ok) continue;
+
+      const songs = extractSongResults(await response.json());
+      if (songs.length === 0) continue;
+
+      const ranked = songs
+        .map((item) => {
+          const id = extractItemId(item);
+          const title = extractItemTitle(item);
+          const artist = extractItemArtist(item);
+          return {
+            item,
+            id,
+            url: extractItemUrl(item),
+            title,
+            artist,
+            duration: extractItemDuration(item),
+            score:
+              scoreTextMatch(track.title, title) +
+              scoreArtistMatch(track.artist, artist),
+          };
+        })
+        .filter((entry) => entry.id || entry.url)
+        .sort((left, right) => right.score - left.score);
+
+      const bestMatch = ranked[0];
+      if (!bestMatch) continue;
+      if (!bestMatch.id) continue;
+      if (!isStrongEnoughMatch(bestMatch.score, track)) continue;
+
+      return {
+        item: bestMatch.item,
+        id: bestMatch.id,
+        url: bestMatch.url,
+        title: bestMatch.title,
+        artist: bestMatch.artist,
+        duration: bestMatch.duration,
+      };
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
+function buildJioSaavnStyleTrack(
+  track: ExternalCatalogTrack,
+  match: JioSaavnPlaybackMatch,
+): Record<string, unknown> {
+  const images = normalizeImageArray(track.coverUrl, match.item.image);
+  const thumbnailUrl = bestImageUrl(images);
+  const primaryArtists =
+    typeof match.item.primaryArtists === "string" &&
+    match.item.primaryArtists.trim()
+      ? match.item.primaryArtists
+      : track.artist || match.artist;
+
+  return {
+    ...match.item,
+    id: match.id,
+    url: match.url ?? `/song/${match.id}`,
+    source: "jiosaavn",
+    type: "song",
+    title: track.title || match.title,
+    name: track.title || match.title,
+    artist: track.artist || match.artist,
+    primaryArtists,
+    image: images,
+    thumbnailUrl,
+    thumbnail: thumbnailUrl,
+    coverUrl: thumbnailUrl,
+    img: thumbnailUrl,
+    duration: track.duration ?? match.duration,
+    album:
+      track.album ||
+      (typeof match.item.album === "string" ? match.item.album : undefined),
+    providerHint: track.provider,
+  };
+}
+
+function pickItunesArtwork(track: Record<string, unknown>): string {
+  for (const field of [
+    track.artworkUrl512,
+    track.artworkUrl100,
+    track.artworkUrl60,
+    track.artworkUrl30,
+  ]) {
+    if (typeof field === "string" && field.trim()) {
+      return field.replace(/\/\d+x\d+bb\./i, "/512x512bb.");
+    }
+  }
+  return "";
+}
+
+function normalizeItunesTrack(
+  track: Record<string, unknown>,
+): ExternalCatalogTrack | null {
+  const title =
+    typeof track.trackName === "string" ? track.trackName.trim() : "";
+  const artist =
+    typeof track.artistName === "string" ? track.artistName.trim() : "";
+  const rawId = track.trackId ?? track.collectionId;
+  const id =
+    typeof rawId === "string" && rawId.trim()
+      ? rawId.trim()
+      : typeof rawId === "number" && Number.isFinite(rawId)
+        ? String(rawId)
+        : "";
+  if (!title || !artist || !id) return null;
+
+  const durationMs = toNumber(track.trackTimeMillis);
+  return {
+    provider: "itunes",
+    id,
+    title,
+    artist,
+    coverUrl: pickItunesArtwork(track),
+    duration:
+      durationMs != null && durationMs > 0
+        ? Math.round(durationMs / 1000)
+        : undefined,
+    album:
+      typeof track.collectionName === "string"
+        ? track.collectionName.trim()
+        : undefined,
+  };
+}
+
+function pickDeezerArtwork(track: Record<string, unknown>): string {
+  const album = toRecord(track.album);
+  for (const field of [
+    album.cover_xl,
+    album.cover_big,
+    album.cover_medium,
+    album.cover,
+  ]) {
+    if (typeof field === "string" && field.trim()) {
+      return field;
+    }
+  }
+  return "";
+}
+
+function normalizeDeezerTrack(
+  track: Record<string, unknown>,
+): ExternalCatalogTrack | null {
+  const artistRecord = toRecord(track.artist);
+  const albumRecord = toRecord(track.album);
+  const title = typeof track.title === "string" ? track.title.trim() : "";
+  const artist =
+    typeof artistRecord.name === "string" ? artistRecord.name.trim() : "";
+  const rawId = track.id;
+  const id =
+    typeof rawId === "string" && rawId.trim()
+      ? rawId.trim()
+      : typeof rawId === "number" && Number.isFinite(rawId)
+        ? String(rawId)
+        : "";
+  if (!title || !artist || !id) return null;
+
+  return {
+    provider: "deezer",
+    id,
+    title,
+    artist,
+    coverUrl: pickDeezerArtwork(track),
+    duration: toNumber(track.duration),
+    album:
+      typeof albumRecord.title === "string"
+        ? albumRecord.title.trim()
+        : undefined,
+  };
+}
+
+function rewriteInvidiousThumbs(item: unknown, instanceBase: string): unknown {
+  const obj = item as Record<string, unknown>;
+  const videoId =
+    typeof obj.videoId === "string"
+      ? obj.videoId
+      : typeof obj.id === "string"
+        ? obj.id
+        : extractYouTubeVideoId(typeof obj.url === "string" ? obj.url : "");
+  const rewriteThumbnailArray = (key: string) => {
+    const arr = obj[key] as Array<Record<string, unknown>> | undefined;
+    if (!Array.isArray(arr)) return;
+    obj[key] = arr.map((t) => {
+      const url = typeof t?.url === "string" ? t.url : "";
+      return {
+        ...t,
+        url:
+          normalizeYouTubeThumbnailUrl({
+            url: absolutizeUrl(url, instanceBase),
+            videoId,
+          }) || absolutizeUrl(url, instanceBase),
+      };
+    });
+  };
+  const rewriteAbsoluteArray = (key: string) => {
+    const arr = obj[key] as Array<Record<string, unknown>> | undefined;
+    if (!Array.isArray(arr)) return;
+    obj[key] = arr.map((t) => {
+      const url = typeof t?.url === "string" ? t.url : "";
+      return { ...t, url: absolutizeUrl(url, instanceBase) };
+    });
+  };
+  rewriteThumbnailArray("videoThumbnails");
+  rewriteAbsoluteArray("authorThumbnails");
+  if (typeof obj.thumbnail === "string") {
+    obj.thumbnail =
+      normalizeYouTubeThumbnailUrl({
+        url: absolutizeUrl(obj.thumbnail, instanceBase),
+        videoId,
+      }) || absolutizeUrl(obj.thumbnail, instanceBase);
+  }
+  if (typeof obj.thumbnailUrl === "string") {
+    obj.thumbnailUrl =
+      normalizeYouTubeThumbnailUrl({
+        url: absolutizeUrl(obj.thumbnailUrl, instanceBase),
+        videoId,
+      }) || absolutizeUrl(obj.thumbnailUrl, instanceBase);
+  }
+  return obj;
+}
+
+async function tryProxyToBackend(
+  backendBaseUrl: string,
+  searchParams: URLSearchParams,
+): Promise<SearchResponse | null> {
+  const url = new URL(`${backendBaseUrl}/search`);
+  searchParams.forEach((value, key) => {
+    url.searchParams.append(key, value);
+  });
+
+  const res = await fetch(url.toString(), {
+    headers: { accept: "application/json" },
+    cache: "no-store",
+  });
+
+  if (!res.ok) return null;
+
+  const data = (await res.json()) as unknown;
+  const parsed = data as { items?: unknown[]; nextpage?: string | null };
+  return { items: parsed.items ?? [], nextpage: parsed.nextpage ?? null };
+}
+
+async function fetchFirstSuccessfulJson(
+  urls: string[],
+): Promise<unknown | null> {
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, {
+        headers: { "User-Agent": USER_AGENT, accept: "application/json" },
+        cache: "no-store",
+      });
+
+      if (!res.ok) continue;
+      return (await res.json()) as unknown;
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
+async function searchPiped(
+  query: string,
+  filter: string,
+  nextpage?: string,
+): Promise<SearchResponse> {
+  const [instance] = await getPipedInstances();
+  if (!instance) return { items: [], nextpage: null };
+  const filterParam = filter === "" ? "all" : filter;
+  const endpoint = nextpage
+    ? `/nextpage/search?nextpage=${encodeURIComponent(nextpage)}`
+    : `/search?q=${encodeURIComponent(query)}&filter=${encodeURIComponent(
+        filterParam,
+      )}`;
+
+  try {
+    const res = await fetch(`${instance}${endpoint}`, {
+      headers: { "User-Agent": USER_AGENT, accept: "application/json" },
+      cache: "no-store",
+      signal: withTimeout(undefined, 1800),
+    });
+
+    if (!res.ok) return { items: [], nextpage: null };
+
+    const data = (await res.json()) as unknown;
+    const parsed = data as { items?: unknown[]; nextpage?: string | null };
+    const items = (parsed.items ?? []).map((item) => {
+      const entry = item as Record<string, unknown>;
+      // Prioritize videoId for the main 'id' field
+      if (entry.videoId) {
+        entry.id = entry.videoId;
+      }
+      // Fallback to parsing from URL if videoId is missing
+      else if (
+        typeof entry.url === "string" &&
+        entry.url.includes("/watch?v=")
+      ) {
+        try {
+          const videoId = new URL(
+            "https://www.youtube.com" + entry.url,
+          ).searchParams.get("v");
+          if (videoId) {
+            entry.id = videoId;
+          }
+        } catch {
+          // Ignore parsing errors
+        }
+      }
+      const videoId =
+        typeof entry.videoId === "string"
+          ? entry.videoId
+          : typeof entry.id === "string"
+            ? entry.id
+            : extractYouTubeVideoId(
+                typeof entry.url === "string" ? entry.url : "",
+              );
+      if (typeof entry.thumbnail === "string") {
+        entry.thumbnail =
+          normalizeYouTubeThumbnailUrl({
+            url: absolutizeUrl(entry.thumbnail, instance),
+            videoId,
+          }) || absolutizeUrl(entry.thumbnail, instance);
+      }
+      if (typeof entry.thumbnailUrl === "string") {
+        entry.thumbnailUrl =
+          normalizeYouTubeThumbnailUrl({
+            url: absolutizeUrl(entry.thumbnailUrl, instance),
+            videoId,
+          }) || absolutizeUrl(entry.thumbnailUrl, instance);
+      }
+      if (Array.isArray(entry.videoThumbnails)) {
+        entry.videoThumbnails = entry.videoThumbnails.map((thumbnail) => {
+          const record =
+            thumbnail &&
+            typeof thumbnail === "object" &&
+            !Array.isArray(thumbnail)
+              ? (thumbnail as Record<string, unknown>)
+              : {};
+          const url =
+            typeof record.url === "string"
+              ? normalizeYouTubeThumbnailUrl({
+                  url: absolutizeUrl(record.url, instance),
+                  videoId,
+                }) || absolutizeUrl(record.url, instance)
+              : record.url;
+          return { ...record, url };
+        });
+      }
+      return { ...entry, source: "youtube" };
+    });
+
+    return { items, nextpage: parsed.nextpage ?? null };
+  } catch {
+    return { items: [], nextpage: null };
+  }
+}
+
+function parseDurationToSeconds(value: unknown): number | undefined {
+  if (typeof value !== "string") return undefined;
+  const parts = value.split(":").map((p) => parseInt(p, 10));
+  if (parts.some((n) => Number.isNaN(n))) return undefined;
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  return undefined;
+}
+
+function normalizeSearchItemType(item: Record<string, unknown>): string {
+  const rawType =
+    typeof item.type === "string" ? item.type.trim().toLowerCase() : "";
+
+  if (rawType === "stream") return "video";
+  if (rawType === "channel") return "artist";
+  if (rawType) return rawType;
+
+  if (item.duration != null || item.lengthSeconds != null) {
+    return "song";
+  }
+
+  return "unknown";
+}
+
+function filterJioSaavnSearchItems(
+  items: Array<Record<string, unknown>>,
+  filter: string,
+): Array<Record<string, unknown>> {
+  const normalizedFilter = (filter || "all").toLowerCase();
+  if (!normalizedFilter || normalizedFilter === "all") return items;
+
+  return items.filter((item) => {
+    const itemType = normalizeSearchItemType(item);
+
+    switch (normalizedFilter) {
+      case "playlists":
+        return itemType === "playlist";
+      case "albums":
+        return itemType === "album";
+      case "artists":
+      case "channels":
+        return itemType === "artist";
+      case "songs":
+      case "tracks":
+      case "videos":
+        return itemType === "song" || itemType === "video";
+      default:
+        return true;
+    }
+  });
+}
+
+function interleaveSearchLists<T>(lists: T[][]): T[] {
+  const output: T[] = [];
+  const maxLength = Math.max(0, ...lists.map((list) => list.length));
+
+  for (let index = 0; index < maxLength; index += 1) {
+    for (const list of lists) {
+      if (list[index]) {
+        output.push(list[index]);
+      }
+    }
+  }
+
+  return output;
+}
+
+function dedupeSearchItems(items: unknown[]): unknown[] {
+  const seen = new Set<string>();
+
+  return items.filter((item) => {
+    const entry = item as Record<string, unknown>;
+    const source =
+      typeof entry.source === "string" ? entry.source : "unknown-source";
+    const identity =
+      entry.id ??
+      entry.videoId ??
+      entry.playlistId ??
+      entry.url ??
+      entry.permalink_url ??
+      entry.title;
+
+    if (identity == null) return true;
+
+    const key = `${source}:${String(identity)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function buildMixedSearchItems(providerItems: unknown[][]): unknown[] {
+  const topResults: unknown[][] = [];
+  const artists: unknown[][] = [];
+  const playlists: unknown[][] = [];
+  const albums: unknown[][] = [];
+  const songs: unknown[][] = [];
+  const others: unknown[][] = [];
+
+  for (const items of providerItems) {
+    const providerTop: unknown[] = [];
+    const providerArtists: unknown[] = [];
+    const providerPlaylists: unknown[] = [];
+    const providerAlbums: unknown[] = [];
+    const providerSongs: unknown[] = [];
+    const providerOthers: unknown[] = [];
+
+    for (const item of items) {
+      const entry = item as Record<string, unknown>;
+      const itemType = normalizeSearchItemType(entry);
+
+      if (itemType === "unknown" || itemType === "hashtag") {
+        providerTop.push(item);
+      } else if (itemType === "artist") {
+        providerArtists.push(item);
+      } else if (itemType === "playlist") {
+        providerPlaylists.push(item);
+      } else if (itemType === "album") {
+        providerAlbums.push(item);
+      } else if (itemType === "song" || itemType === "video") {
+        providerSongs.push(item);
+      } else {
+        providerOthers.push(item);
+      }
+    }
+
+    topResults.push(providerTop);
+    artists.push(providerArtists);
+    playlists.push(providerPlaylists);
+    albums.push(providerAlbums);
+    songs.push(providerSongs);
+    others.push(providerOthers);
+  }
+
+  return dedupeSearchItems([
+    ...interleaveSearchLists(topResults),
+    ...interleaveSearchLists(artists),
+    ...interleaveSearchLists(playlists),
+    ...interleaveSearchLists(albums),
+    ...interleaveSearchLists(songs),
+    ...interleaveSearchLists(others),
+  ]);
+}
+
+async function searchYtify(
+  query: string,
+  filter: string,
+): Promise<SearchResponse> {
+  const endpoints = await getProviderEndpoints();
+  const ytifyInstance = endpoints.providers.search.ytifyInstance;
+  const youtubeWebBase = endpoints.providers.youtube.webBase;
+  const f = (filter || "all").toLowerCase();
+  const ytifyUrlCandidates = buildProviderUrlCandidates(
+    ytifyInstance,
+    ["/search"],
+    {
+      q: query,
+      f: f === "" ? "all" : f,
+    },
+  );
+  reportDebugEvent(
+    `pre-ytify-${Date.now()}`,
+    "B",
+    "app/api/search/route.ts:searchYtify:candidates",
+    "[DEBUG] ytify search candidate URLs built",
+    {
+      query,
+      filter: f,
+      ytifyInstance,
+      ytifyUrlCandidates,
+    },
+  );
+  const data = await fetchFirstSuccessfulJson(ytifyUrlCandidates);
+  if (!Array.isArray(data)) return { items: [], nextpage: null };
+
+  const items = data.map((entry) => {
+    const e = entry as Record<string, unknown>;
+    let id = typeof e.id === "string" ? e.id : "";
+
+    // Extract video ID from YouTube URL if id contains full URL
+    if (id.includes("youtube.com/watch?v=")) {
+      const match = id.match(/[?&]v=([^&]+)/);
+      if (match?.[1]) {
+        id = match[1];
+      }
+    }
+
+    const type = typeof e.type === "string" ? e.type : "video";
+    const title = typeof e.title === "string" ? e.title : "";
+    const author = typeof e.author === "string" ? e.author : "";
+    const authorId = typeof e.authorId === "string" ? e.authorId : "";
+    const durationSeconds = parseDurationToSeconds(e.duration);
+
+    const thumb = id
+      ? normalizeYouTubeThumbnailUrl({
+          videoId: id,
+          variant: "hqdefault.jpg",
+        }) || ""
+      : "";
+
+    return {
+      source: "youtube",
+      type: type === "video" ? "stream" : type,
+      id: id, // Use 'id' field instead of 'videoId' to match frontend expectations
+      videoId: id, // Keep videoId for compatibility
+      url: id ? `${youtubeWebBase}/watch?v=${id}` : "",
+      title,
+      uploaderName: author,
+      uploaderUrl: authorId
+        ? `${youtubeWebBase}/channel/${authorId}`
+        : undefined,
+      thumbnail: thumb,
+      duration: durationSeconds,
+      uploaded: typeof e.subtext === "string" ? e.subtext : undefined,
+    } as Record<string, unknown>;
+  });
+
+  return { items, nextpage: null };
+}
+
+async function searchYouTubeMusic(
+  query: string,
+  filter: string,
+  nextpage?: string,
+): Promise<SearchResponse> {
+  const musicFilter = musicFilterMap(filter || "songs");
+  const result = await searchPiped(query, musicFilter, nextpage);
+  const items = result.items.map((item) => {
+    const entry = item as Record<string, unknown>;
+    const videoId = entry.videoId as string | undefined;
+    if (videoId) {
+      entry.id = videoId;
+    }
+    return {
+      ...entry,
+      source: "youtubemusic",
+    };
+  });
+  return { items, nextpage: result.nextpage ?? null };
+}
+
+async function searchInvidious(
+  query: string,
+  filter: string,
+  page: number,
+): Promise<SearchResponse> {
+  const typeParam = mapFilterToInvidiousType(filter);
+  const invidiousInstances = await getInvidiousInstances();
+
+  for (const instance of invidiousInstances) {
+    try {
+      const url = new URL(`${instance}/api/v1/search`);
+      url.searchParams.set("q", query);
+      url.searchParams.set("page", String(page));
+      if (typeParam) url.searchParams.set("type", typeParam);
+
+      const res = await fetch(url.toString(), {
+        headers: { "User-Agent": USER_AGENT, accept: "application/json" },
+        cache: "no-store",
+      });
+
+      if (!res.ok) continue;
+
+      const data = (await res.json()) as unknown;
+      if (!Array.isArray(data)) continue;
+
+      const items = data.map((item) => {
+        const entry = rewriteInvidiousThumbs(item, instance) as Record<
+          string,
+          unknown
+        >;
+        // Prioritize videoId for the main 'id' field
+        if (entry.videoId) {
+          entry.id = entry.videoId;
+        }
+        // Invidious usually provides videoId, this is a fallback
+        else if (
+          typeof entry.url === "string" &&
+          entry.url.includes("/watch?v=")
+        ) {
+          try {
+            const videoId = new URL(
+              "https://www.youtube.com" + entry.url,
+            ).searchParams.get("v");
+            if (videoId) {
+              entry.id = videoId;
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+        return { ...entry, source: "youtube" };
+      });
+
+      return { items, nextpage: null };
+    } catch {
+      continue;
+    }
+  }
+
+  return { items: [], nextpage: null };
+}
+
+async function searchSoundCloud(
+  query: string,
+  filter: string,
+  page: number,
+  limit: number,
+): Promise<SearchResponse> {
+  const endpoints = await getProviderEndpoints();
+  const beatseekBase = endpoints.providers.beatseek.apiBase;
+  const soundcloudSearchProxyBase =
+    endpoints.providers.search.soundcloudSearchProxyBase;
+  const normalizeTrackDuration = (value: unknown): number | undefined => {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value > 10000 ? Math.floor(value / 1000) : Math.floor(value);
+    }
+    if (typeof value === "string" && value.trim()) {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) {
+        return parsed > 10000 ? Math.floor(parsed / 1000) : Math.floor(parsed);
+      }
+    }
+    return undefined;
+  };
+
+  const normalizeTrackItem = (input: Record<string, unknown>) => {
+    const user =
+      input.user && typeof input.user === "object"
+        ? (input.user as Record<string, unknown>)
+        : {};
+
+    return {
+      ...input,
+      id: input.id || input.permalink_url || input.url,
+      title: input.title,
+      author:
+        user.username ||
+        (typeof input.author === "string" ? input.author : undefined) ||
+        "Unknown Artist",
+      thumbnailUrl:
+        input.artwork_url ||
+        input.thumbnailUrl ||
+        input.thumbnail ||
+        user.avatar_url,
+      url: input.permalink_url || input.permalinkUrl || input.url || input.href,
+      duration: normalizeTrackDuration(input.duration),
+      source: "soundcloud",
+    };
+  };
+
+  const f = (filter || "").toLowerCase();
+  const offset = (page - 1) * limit;
+  try {
+    if (f === "playlists" || f === "albums") {
+      const beatseekUrls = buildProviderUrlCandidates(
+        beatseekBase,
+        ["/search", "/api/search"],
+        {
+          query,
+          platform: "soundcloud",
+          type: f,
+          sort: "both",
+          limit,
+        },
+      );
+      const beatseekUrl = beatseekUrls[0] || "";
+      // #region debug-point B:soundcloud-search-upstream-start
+      reportDebugEvent(
+        `pre-soundcloud-${Date.now()}`,
+        "B",
+        "app/api/search/route.ts:searchSoundCloud:upstream-start",
+        "[DEBUG] SoundCloud collection search hitting Beatseek",
+        {
+          query,
+          filter: f,
+          page,
+          limit,
+          beatseekUrl,
+          beatseekUrls,
+        },
+      );
+      // #endregion
+      const json = await fetchFirstSuccessfulJson(beatseekUrls);
+
+      if (!json) {
+        // #region debug-point B:soundcloud-search-upstream-non-ok
+        reportDebugEvent(
+          `pre-soundcloud-${Date.now()}`,
+          "B",
+          "app/api/search/route.ts:searchSoundCloud:upstream-non-ok",
+          "[DEBUG] SoundCloud collection search upstream returned non-OK",
+          {
+            query,
+            filter: f,
+            candidateCount: beatseekUrls.length,
+          },
+        );
+        // #endregion
+        return { items: [], nextpage: null };
+      }
+      const results = (json as { results?: unknown[] }).results ?? [];
+      // #region debug-point B:soundcloud-search-upstream-success
+      reportDebugEvent(
+        `pre-soundcloud-${Date.now()}`,
+        "B",
+        "app/api/search/route.ts:searchSoundCloud:upstream-success",
+        "[DEBUG] SoundCloud collection search upstream payload parsed",
+        {
+          query,
+          filter: f,
+          resultCount: Array.isArray(results) ? results.length : -1,
+          payloadKeys:
+            json && typeof json === "object" && !Array.isArray(json)
+              ? Object.keys(json as Record<string, unknown>)
+              : [],
+          firstUrl:
+            Array.isArray(results) && results[0]
+              ? String((results[0] as Record<string, unknown>).url ?? "")
+              : null,
+        },
+      );
+      // #endregion
+      const items = results.map((entry) => {
+        const record = entry as Record<string, unknown>;
+        const artwork = upgradeSoundCloudImage(
+          (record.artworkUrl as string) || "",
+        );
+
+        return {
+          ...record,
+          id: String(record.id || record.url || ""),
+          url: record.url || "",
+          href: record.url || "",
+          title: record.title || "",
+          author: record.artist || "",
+          thumbnailUrl: artwork,
+          img: artwork,
+          videoCount:
+            typeof record.trackCount === "number"
+              ? record.trackCount
+              : typeof record.trackCount === "string"
+                ? Number.parseInt(record.trackCount, 10)
+                : undefined,
+          duration: normalizeTrackDuration(record.duration),
+          uploaded:
+            typeof record.createdAt === "string" ? record.createdAt : undefined,
+          type: f === "albums" ? "album" : "playlist",
+          source: "soundcloud",
+        };
+      });
+
+      return { items, nextpage: null };
+    }
+
+    const proxyUrlCandidates = buildProviderUrlCandidates(
+      soundcloudSearchProxyBase,
+      ["/tracks", "/api/tracks"],
+      { q: query, limit, offset },
+    );
+    reportDebugEvent(
+      `pre-soundcloud-${Date.now()}`,
+      "B",
+      "app/api/search/route.ts:searchSoundCloud:track-candidates",
+      "[DEBUG] SoundCloud track search candidate URLs built",
+      {
+        query,
+        filter: f,
+        soundcloudSearchProxyBase,
+        proxyUrlCandidates,
+      },
+    );
+    const json = await fetchFirstSuccessfulJson(proxyUrlCandidates);
+    if (!json) return { items: [], nextpage: null };
+    const data = json as { collection?: unknown[]; results?: unknown[] };
+    const collection = data.collection ?? data.results ?? [];
+
+    const items = collection.map((entry) =>
+      normalizeTrackItem(entry as Record<string, unknown>),
+    );
+    return { items, nextpage: null };
+  } catch (error) {
+    // #region debug-point B:soundcloud-search-exception
+    reportDebugEvent(
+      `pre-soundcloud-${Date.now()}`,
+      "B",
+      "app/api/search/route.ts:searchSoundCloud:exception",
+      "[DEBUG] SoundCloud search threw exception",
+      {
+        query,
+        filter: f,
+        page,
+        limit,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    );
+    // #endregion
+    return { items: [], nextpage: null };
+  }
+}
+
+async function searchJioSaavn(
+  query: string,
+  filter = "all",
+): Promise<SearchResponse> {
+  try {
+    const endpoints = await getProviderEndpoints();
+    const jiosaavnUrlCandidates = buildProviderUrlCandidates(
+      endpoints.providers.jiosaavn.apiBase,
+      ["/api/search", "/search"],
+      { query },
+    );
+    reportDebugEvent(
+      `pre-jiosaavn-${Date.now()}`,
+      "B",
+      "app/api/search/route.ts:searchJioSaavn:candidates",
+      "[DEBUG] JioSaavn search candidate URLs built",
+      {
+        query,
+        apiBase: endpoints.providers.jiosaavn.apiBase,
+        jiosaavnUrlCandidates,
+      },
+    );
+    const json = await fetchFirstSuccessfulJson(jiosaavnUrlCandidates);
+    if (!json) return { items: [], nextpage: null };
+    const data = json as { success?: boolean; data?: Record<string, unknown> };
+    if (!data?.success) return { items: [], nextpage: null };
+
+    const topQuery = (data.data?.topQuery as { results?: unknown[] })?.results;
+    const songs = (data.data?.songs as { results?: unknown[] })?.results;
+    const albums = (data.data?.albums as { results?: unknown[] })?.results;
+    const artists = (data.data?.artists as { results?: unknown[] })?.results;
+    const playlists = (data.data?.playlists as { results?: unknown[] })
+      ?.results;
+
+    const items: Array<Record<string, unknown>> = [];
+    for (const entry of topQuery ?? []) {
+      const item: Record<string, unknown> = {
+        ...(entry as Record<string, unknown>),
+        source: "jiosaavn",
+      };
+      // Ensure the entry has the correct 'id' field for the frontend
+      if (!item.id && typeof item.videoId === "string") {
+        item.id = item.videoId;
+      }
+      items.push(item);
+    }
+    for (const entry of songs ?? []) {
+      const item: Record<string, unknown> = {
+        ...(entry as Record<string, unknown>),
+        source: "jiosaavn",
+      };
+      // Ensure the entry has the correct 'id' field for the frontend
+      if (!item.id && typeof item.videoId === "string") {
+        item.id = item.videoId;
+      }
+      items.push(item);
+    }
+    for (const entry of albums ?? []) {
+      const item: Record<string, unknown> = {
+        ...(entry as Record<string, unknown>),
+        source: "jiosaavn",
+      };
+      // Ensure the entry has the correct 'id' field for the frontend
+      if (!item.id && typeof item.videoId === "string") {
+        item.id = item.videoId;
+      }
+      items.push(item);
+    }
+    for (const entry of artists ?? []) {
+      const item: Record<string, unknown> = {
+        ...(entry as Record<string, unknown>),
+        source: "jiosaavn",
+      };
+      // Ensure the entry has the correct 'id' field for the frontend
+      if (!item.id && typeof item.videoId === "string") {
+        item.id = item.videoId;
+      }
+      items.push(item);
+    }
+    for (const entry of playlists ?? []) {
+      const item: Record<string, unknown> = {
+        ...(entry as Record<string, unknown>),
+        source: "jiosaavn",
+        type: "playlist",
+      };
+      if (!item.id && typeof item.videoId === "string") {
+        item.id = item.videoId;
+      }
+      items.push(item);
+    }
+
+    return {
+      items: filterJioSaavnSearchItems(items, filter),
+      nextpage: null,
+    };
+  } catch {
+    return { items: [], nextpage: null };
+  }
+}
+
+async function searchItunesCatalog(
+  query: string,
+  limit: number,
+  itunesApiBase: string,
+): Promise<SearchResponse> {
+  const signal = withTimeout(undefined, 12000);
+  const safeLimit = clampCatalogLimit(limit);
+
+  const url = new URL(itunesApiBase);
+  url.searchParams.set("term", query);
+  url.searchParams.set("entity", "song");
+  url.searchParams.set("limit", String(safeLimit));
+
+  const response = await fetch(url.toString(), {
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(`iTunes HTTP ${response.status}`);
+  }
+
+  const payload = (await response.json()) as { results?: unknown[] };
+  const tracks = toArray(payload.results)
+    .map((entry) => normalizeItunesTrack(toRecord(entry)))
+    .filter((entry): entry is ExternalCatalogTrack => Boolean(entry));
+
+  const matchedTracks = await Promise.all(
+    tracks.map(async (track) => {
+      const playback = await findJioSaavnPlayback(track, signal);
+      return playback ? buildJioSaavnStyleTrack(track, playback) : null;
+    }),
+  );
+
+  return {
+    items: matchedTracks.filter((entry): entry is Record<string, unknown> =>
+      Boolean(entry),
+    ),
+    nextpage: null,
+  };
+}
+
+async function searchDeezerCatalog(
+  query: string,
+  limit: number,
+  deezerApiBase: string,
+  deezerFallbackPrefix: string,
+): Promise<SearchResponse> {
+  const signal = withTimeout(undefined, 12000);
+  const safeLimit = clampCatalogLimit(limit);
+  const payload = await fetchDeezerPayload(
+    query,
+    safeLimit,
+    signal,
+    deezerApiBase,
+    deezerFallbackPrefix,
+  );
+  const tracks = toArray(payload.data)
+    .map((entry) => normalizeDeezerTrack(toRecord(entry)))
+    .filter((entry): entry is ExternalCatalogTrack => Boolean(entry));
+
+  const matchedTracks = await Promise.all(
+    tracks.map(async (track) => {
+      const playback = await findJioSaavnPlayback(track, signal);
+      return playback ? buildJioSaavnStyleTrack(track, playback) : null;
+    }),
+  );
+
+  return {
+    items: matchedTracks.filter((entry): entry is Record<string, unknown> =>
+      Boolean(entry),
+    ),
+    nextpage: null,
+  };
+}
+
+async function searchYouTubeDefault(
+  query: string,
+  filter: string,
+  page: number,
+  nextpage?: string,
+): Promise<SearchResponse> {
+  const piped = await searchPiped(query, filter, nextpage);
+  if (piped.items.length > 0) return piped;
+
+  const invidious = await searchInvidious(query, filter, page);
+  if (invidious.items.length > 0) return invidious;
+
+  return searchYtify(query, filter);
+}
+
+async function searchMixed(
+  query: string,
+  filter: string,
+  page: number,
+  limit: number,
+): Promise<SearchResponse> {
+  const normalizedFilter = (filter || "all").toLowerCase();
+  const youtubeFilter = normalizedFilter === "playlists" ? "playlists" : "all";
+  const youtubeMusicFilter =
+    normalizedFilter === "playlists" ? "playlists" : "all";
+  const soundCloudTasks =
+    normalizedFilter === "playlists"
+      ? [searchSoundCloud(query, "playlists", page, limit)]
+      : [
+          searchSoundCloud(query, "tracks", page, limit),
+          searchSoundCloud(query, "playlists", page, Math.max(8, limit / 2)),
+          searchSoundCloud(query, "albums", page, Math.max(8, limit / 2)),
+        ];
+
+  const [
+    youtubeResult,
+    youtubeMusicResult,
+    jioSaavnResult,
+    ...soundCloudResults
+  ] = await Promise.all([
+    searchYouTubeDefault(query, youtubeFilter, page),
+    searchYouTubeMusic(query, youtubeMusicFilter),
+    searchJioSaavn(query, normalizedFilter),
+    ...soundCloudTasks,
+  ]);
+
+  const items = buildMixedSearchItems([
+    youtubeResult.items,
+    youtubeMusicResult.items,
+    ...soundCloudResults.map((result) => result.items),
+    jioSaavnResult.items,
+  ]).slice(0, Math.max(limit * 3, 40));
+
+  return { items, nextpage: null };
+}
+
+export async function GET(request: NextRequest) {
+  const blockedResponse = requireStreamifyRequest(request);
+  if (blockedResponse) return blockedResponse;
+
+  const searchParams = request.nextUrl.searchParams;
+  const q = (searchParams.get("q") || "").trim();
+  const sourceParam = (searchParams.get("source") || "mixed").toLowerCase();
+  const filterParam = searchParams.get("filter") || "";
+  const pageNum = parseInt(searchParams.get("page") || "1", 10) || 1;
+  const limitNum = parseInt(searchParams.get("limit") || "20", 10) || 20;
+  const nextpage = searchParams.get("nextpage") || undefined;
+  const runId = `pre-${Date.now()}`;
+  const endpoints = await getProviderEndpoints();
+
+  // #region debug-point A:search-route-entry
+  reportDebugEvent(
+    runId,
+    "A",
+    "app/api/search/route.ts:GET:entry",
+    "[DEBUG] /api/search request received",
+    {
+      url: request.url,
+      q,
+      sourceParam,
+      filterParam,
+      pageNum,
+      limitNum,
+      nextpage,
+    },
+  );
+  // #endregion
+
+  const origin = request.nextUrl.origin;
+  const backendBaseUrl = getBackendBaseUrl(origin);
+  // #region debug-point A:search-route-proxy-config
+  reportDebugEvent(
+    runId,
+    "A",
+    "app/api/search/route.ts:GET:proxy-config",
+    "[DEBUG] search route proxy configuration",
+    {
+      origin,
+      backendBaseUrl,
+      sourceParam,
+      filterParam,
+    },
+  );
+  // #endregion
+  if (backendBaseUrl) {
+    try {
+      const proxied = await tryProxyToBackend(backendBaseUrl, searchParams);
+      if (proxied && (proxied.items.length > 0 || proxied.nextpage)) {
+        // #region debug-point B:search-route-proxy-success
+        reportDebugEvent(
+          runId,
+          "B",
+          "app/api/search/route.ts:GET:proxy-success",
+          "[DEBUG] search route used backend proxy",
+          {
+            backendBaseUrl,
+            sourceParam,
+            filterParam,
+            itemCount: proxied.items.length,
+            nextpage: proxied.nextpage ?? null,
+          },
+        );
+        // #endregion
+        return NextResponse.json(
+          { items: proxied.items, nextpage: proxied.nextpage ?? null },
+          { status: 200 },
+        );
+      }
+      reportDebugEvent(
+        runId,
+        "B",
+        "app/api/search/route.ts:GET:proxy-empty-fallback",
+        "[DEBUG] backend proxy returned empty result and route will fall back to built-in providers",
+        {
+          backendBaseUrl,
+          sourceParam,
+          filterParam,
+          itemCount: proxied?.items.length ?? 0,
+          nextpage: proxied?.nextpage ?? null,
+        },
+      );
+    } catch (error) {
+      // #region debug-point E:search-backend-proxy-failed
+      reportDebugEvent(
+        runId,
+        "E",
+        "app/api/search/route.ts:GET:backend-proxy-failed",
+        "[DEBUG] backend proxy failed",
+        {
+          backendBaseUrl,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      );
+      // #endregion
+      // fall through to built-in providers
+    }
+  }
+
+  if (!q) {
+    return NextResponse.json({ items: [], nextpage: null }, { status: 200 });
+  }
+
+  try {
+    let result: SearchResponse = { items: [], nextpage: null };
+
+    // #region debug-point B:search-branch
+    reportDebugEvent(
+      runId,
+      "B",
+      "app/api/search/route.ts:GET:branch",
+      "[DEBUG] selecting search provider branch",
+      {
+        sourceParam,
+        hasQuery: Boolean(q),
+        filterParam,
+        pageNum,
+        nextpage,
+      },
+    );
+    // #endregion
+
+    switch (sourceParam) {
+      case "mixed":
+        result = await searchMixed(q, filterParam, pageNum, limitNum);
+        break;
+      case "piped":
+        result = await searchPiped(q, filterParam, nextpage);
+        break;
+      case "youtube":
+        result = await searchYouTubeDefault(q, filterParam, pageNum, nextpage);
+        break;
+      case "invidious":
+        result = await searchInvidious(q, filterParam, pageNum);
+        break;
+      case "youtubemusic":
+        result = await searchYouTubeMusic(q, filterParam, nextpage);
+        if (result.items.length === 0) {
+          result = await searchYtify(q, filterParam);
+        }
+        break;
+      case "soundcloud":
+        result = await searchSoundCloud(q, filterParam, pageNum, limitNum);
+        // #region debug-point B:search-route-soundcloud-result
+        reportDebugEvent(
+          runId,
+          "B",
+          "app/api/search/route.ts:GET:soundcloud-result",
+          "[DEBUG] search route used built-in SoundCloud provider",
+          {
+            sourceParam,
+            filterParam,
+            pageNum,
+            limitNum,
+            itemCount: result.items.length,
+            sampleId:
+              Array.isArray(result.items) && result.items[0]
+                ? String(
+                    (result.items[0] as Record<string, unknown>).id ??
+                      (result.items[0] as Record<string, unknown>).url ??
+                      "",
+                  )
+                : null,
+          },
+        );
+        // #endregion
+        break;
+      case "jiosaavn":
+        result = await searchJioSaavn(q, filterParam);
+        break;
+      case "itunes":
+        result = await searchItunesCatalog(
+          q,
+          limitNum,
+          endpoints.providers.itunes.apiBase,
+        );
+        break;
+      case "deezer":
+        result = await searchDeezerCatalog(
+          q,
+          limitNum,
+          endpoints.providers.deezer.apiBase,
+          endpoints.providers.deezer.fallbackProxyPrefix,
+        );
+        break;
+      default:
+        result = { items: [], nextpage: null };
+    }
+
+    // #region debug-point C:search-route-success
+    reportDebugEvent(
+      runId,
+      "C",
+      "app/api/search/route.ts:GET:success",
+      "[DEBUG] /api/search completed",
+      {
+        sourceParam,
+        itemCount: Array.isArray(result.items) ? result.items.length : -1,
+        nextpage: result.nextpage ?? null,
+      },
+    );
+    // #endregion
+
+    return NextResponse.json(
+      { items: result.items, nextpage: result.nextpage ?? null },
+      { status: 200 },
+    );
+  } catch (error) {
+    // #region debug-point D:search-route-failed
+    reportDebugEvent(
+      runId,
+      "D",
+      "app/api/search/route.ts:GET:failed",
+      "[DEBUG] /api/search failed",
+      {
+        sourceParam,
+        q,
+        filterParam,
+        pageNum,
+        nextpage,
+        error: error instanceof Error ? error.message : String(error),
+        stack:
+          error instanceof Error && error.stack
+            ? error.stack.split("\n").slice(0, 5).join("\n")
+            : null,
+      },
+    );
+    // #endregion
+    return NextResponse.json(
+      { items: [], error: "Search failed" },
+      { status: 500 },
+    );
+  }
+}

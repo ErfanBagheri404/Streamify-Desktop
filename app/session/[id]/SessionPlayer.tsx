@@ -1,0 +1,393 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { SessionState, UserRole } from "./types";
+import { formatDuration, roleCanControl } from "./types";
+
+const FILTERS = [
+  { value: "", label: "None" },
+  { value: "bassboost", label: "Bass Boost" },
+  { value: "nightcore", label: "Nightcore" },
+  { value: "vaporwave", label: "Vaporwave" },
+  { value: "8d", label: "8D" },
+  { value: "equalizer", label: "Equalizer" },
+  { value: "karaoke", label: "Karaoke" },
+  { value: "tremolo", label: "Tremolo" },
+  { value: "vibrato", label: "Vibrato" },
+  { value: "flanger", label: "Flanger" },
+  { value: "phaser", label: "Phaser" },
+  { value: "lowpass", label: "Low Pass" },
+  { value: "highpass", label: "High Pass" },
+  { value: "channels", label: "Channels" },
+  { value: "gate", label: "Gate" },
+  { value: "sidescreen", label: "Sidechain" },
+];
+
+function discordAvatarUrl(userId: string, avatar: string | null | undefined): string | null {
+  if (!userId || !avatar) return null;
+  return `https://cdn.discordapp.com/avatars/${userId}/${avatar}.png?size=64`;
+}
+
+interface SessionPlayerProps {
+  state: SessionState;
+  role: UserRole | undefined;
+  sendCommand: (type: string, payload?: Record<string, unknown>) => void;
+}
+
+export function SessionPlayer({ state, role, sendCommand }: SessionPlayerProps) {
+  const [localProgress, setLocalProgress] = useState(0);
+  const [showFilter, setShowFilter] = useState(false);
+  const [hoverPosition, setHoverPosition] = useState<number | null>(null); // ms
+  const progressRef = useRef<HTMLDivElement>(null);
+  const rafRef = useRef<number>(0);
+  const lastTrackIdRef = useRef<string | null>(null);
+  const positionBaseRef = useRef<number>(0); // server position in ms
+  const positionBaseTimeRef = useRef<number>(0); // performance.now when base was set
+  const lastPositionRef = useRef<number | undefined>(undefined); // last server position received
+  const isDisabled = !roleCanControl(role);
+
+  const [optimisticLoop, setOptimisticLoop] = useState<boolean | null>(null);
+  const [optimisticLoopQueue, setOptimisticLoopQueue] = useState<boolean | null>(null);
+
+  const { current, isPlaying, loop, loopQueue, filter } = state;
+  const loopActive = optimisticLoop ?? loop;
+  const loopQueueActive = optimisticLoopQueue ?? loopQueue;
+
+  useEffect(() => { setOptimisticLoop(null); }, [loop]);
+  useEffect(() => { setOptimisticLoopQueue(null); }, [loopQueue]);
+
+  const requestedById = current?.requestedBy ?? "";
+  const requestedByName = state.userNames?.[requestedById] || requestedById || "Unknown";
+  const requestedByAvatarUrl = discordAvatarUrl(requestedById, state.userAvatars?.[requestedById]);
+
+  // Server position in ms → local seconds
+  const serverPositionSec = state.position != null ? state.position / 1000 : undefined;
+
+  // Track changes → reset
+  const trackId = current?.id ?? null;
+  if (trackId !== lastTrackIdRef.current) {
+    lastTrackIdRef.current = trackId;
+    positionBaseRef.current = 0;
+    positionBaseTimeRef.current = performance.now();
+    lastPositionRef.current = undefined;
+    setLocalProgress(0);
+  }
+
+  // When server position arrives, update the base
+  useEffect(() => {
+    if (serverPositionSec == null) return;
+    // Reset base if: no previous position, or track changed, or drift > 2s
+    const prev = lastPositionRef.current;
+    if (prev == null || Math.abs(serverPositionSec - prev) > 2) {
+      positionBaseRef.current = serverPositionSec;
+      positionBaseTimeRef.current = performance.now();
+      setLocalProgress(serverPositionSec);
+    }
+    lastPositionRef.current = serverPositionSec;
+  }, [serverPositionSec]);
+
+  // RAF interpolation between server updates
+  useEffect(() => {
+    if (!current || !isPlaying) {
+      cancelAnimationFrame(rafRef.current);
+      return;
+    }
+    const tick = (now: number) => {
+      const elapsed = (now - positionBaseTimeRef.current) / 1000;
+      const projected = positionBaseRef.current + elapsed;
+      setLocalProgress(Math.min(projected, current.duration));
+      rafRef.current = requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [current, isPlaying]);
+
+  // Seek on progress bar click
+  const handleProgressClick = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      if (isDisabled || !progressRef.current || !current) return;
+      const rect = progressRef.current.getBoundingClientRect();
+      const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      const clickedMs = Math.round(ratio * current.duration * 1000);
+      sendCommand("seek", { position: clickedMs });
+    },
+    [isDisabled, current, sendCommand],
+  );
+
+  // Hover position for indicator
+  const handleProgressHover = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      if (!progressRef.current || !current) {
+        setHoverPosition(null);
+        return;
+      }
+      const rect = progressRef.current.getBoundingClientRect();
+      const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      setHoverPosition(Math.round(ratio * current.duration * 1000));
+    },
+    [current],
+  );
+
+  const handleProgressLeave = useCallback(() => setHoverPosition(null), []);
+
+  // Clamp display
+  const displayProgress = Math.max(0, Math.min(localProgress, current?.duration ?? 0));
+
+  return (
+    <div className="rounded-xl border p-5 sm:p-6" style={{ background: "var(--surface-1)", borderColor: "var(--border-subtle)" }}>
+      {!current ? (
+        <div className="flex flex-col items-center justify-center py-12 gap-3">
+          <div className="relative">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{color:"var(--muted-foreground)"}}>
+              <circle cx="12" cy="12" r="10"/>
+              <path d="M9 10V16M15 10V16M8 10h8M9 8h6"/>
+            </svg>
+          </div>
+          {state.queue.length > 0 ? (
+            <>
+              <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>
+                {state.queue.length} track{state.queue.length > 1 ? "s" : ""} in queue
+              </p>
+              <button
+                onClick={() => sendCommand("play")}
+                disabled={isDisabled}
+                className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-40"
+                style={{ background: "var(--theme-accent)", color: "var(--theme-accent-contrast)" }}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                Play Queue
+              </button>
+            </>
+          ) : (
+            <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>
+              Nothing playing right now. Add something to the queue!
+            </p>
+          )}
+        </div>
+      ) : (
+        <>
+          {/* Track info */}
+          <div className="flex gap-4 items-start">
+            <div className="relative h-24 w-24 sm:h-32 sm:w-32 flex-shrink-0 overflow-hidden rounded-lg bg-black/30">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={current.thumbnail} alt={current.title} className="h-full w-full object-cover" loading="lazy" />
+              <span className="absolute bottom-1 right-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-white/80 backdrop-blur-sm">
+                {current.source}
+              </span>
+            </div>
+
+            <div className="min-w-0 flex-1">
+              <h2 className="text-lg sm:text-xl font-bold truncate">{current.title}</h2>
+              <p className="text-sm truncate" style={{ color: "var(--muted-foreground)" }}>
+                {current.artist}
+              </p>
+              <div className="flex items-center gap-1.5 mt-1.5" style={{ color: "var(--muted-foreground)" }}>
+                {requestedByAvatarUrl ? (
+                  <img src={requestedByAvatarUrl} alt="" className="h-4 w-4 rounded-full" />
+                ) : requestedById ? (
+                  <span className="inline-flex h-4 w-4 items-center justify-center rounded-full text-[8px] font-bold" style={{ background: "var(--surface-3)", color: "var(--foreground)" }}>
+                    {requestedByName.charAt(0).toUpperCase()}
+                  </span>
+                ) : null}
+                <span className="text-xs">Added by {requestedByName}</span>
+              </div>
+
+              {filter && (
+                <span
+                  className="mt-2 inline-block rounded-full px-2.5 py-0.5 text-[11px] font-medium"
+                  style={{ background: "var(--surface-3)", color: "var(--theme-accent)" }}
+                >
+                  {filter}
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Progress bar — seekable */}
+          <div className="relative mt-5 group">
+            {/* Hover time indicator */}
+            {hoverPosition != null && (
+              <div
+                className="absolute -top-7 -translate-x-1/2 text-[11px] font-medium px-1.5 py-0.5 rounded pointer-events-none whitespace-nowrap z-10"
+                style={{
+                  left: `${current.duration > 0 ? (hoverPosition / (current.duration * 1000)) * 100 : 0}%`,
+                  background: "var(--surface-3)",
+                  color: "var(--foreground)",
+                }}
+              >
+                {formatDuration(hoverPosition / 1000)}
+              </div>
+            )}
+            <div
+              ref={progressRef}
+              className="h-1.5 w-full rounded-full overflow-hidden cursor-pointer relative"
+              style={{ background: "var(--surface-3)" }}
+              title={`${formatDuration(displayProgress)} / ${formatDuration(current.duration)}`}
+              onClick={handleProgressClick}
+              onMouseMove={handleProgressHover}
+              onMouseLeave={handleProgressLeave}
+            >
+              <div
+                className="h-full rounded-full"
+                style={{
+                  width: `${(displayProgress / current.duration) * 100}%`,
+                  background: "var(--theme-accent)",
+                  transition: "none",
+                }}
+              />
+              {/* Hover overlay */}
+              {hoverPosition != null && (
+                <div
+                  className="absolute inset-y-0 left-0 rounded-full pointer-events-none"
+                  style={{
+                    width: `${current.duration > 0 ? (hoverPosition / (current.duration * 1000)) * 100 : 0}%`,
+                    background: "rgba(255,255,255,0.1)",
+                  }}
+                />
+              )}
+            </div>
+          </div>
+          <div className="mt-1 flex justify-between text-xs" style={{ color: "var(--muted-foreground)" }}>
+            <span className="tabular-nums">{formatDuration(displayProgress)}</span>
+            <span className="tabular-nums">{formatDuration(current.duration)}</span>
+          </div>
+
+          {/* All controls in one row: Loop, Q-Loop | Prev, Play/Pause, Next, Stop | Lyrics, Filter */}
+          <div className="mt-4 flex items-center justify-center gap-1 sm:gap-2">
+            {/* Loop */}
+            <button
+              disabled={isDisabled}
+              onClick={() => { setOptimisticLoop(!loopActive); sendCommand("loop"); }}
+              className="flex h-8 items-center gap-1 rounded-lg px-2 text-[11px] font-medium transition-all hover:scale-105 active:scale-95 disabled:opacity-40"
+              style={{
+                background: loopActive ? "rgba(var(--theme-accent-rgb, 128,128,128), 0.15)" : "transparent",
+                color: loopActive ? "var(--theme-accent)" : "var(--muted-foreground)",
+                border: loopActive ? "1px solid rgba(var(--theme-accent-rgb, 128,128,128), 0.3)" : "1px solid transparent",
+              }}
+              title={loopActive ? "Disable loop" : "Enable loop"}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>
+              <span className="hidden sm:inline">Loop</span>
+            </button>
+
+            {/* Queue Loop */}
+            <button
+              disabled={isDisabled}
+              onClick={() => { setOptimisticLoopQueue(!loopQueueActive); sendCommand("loopqueue"); }}
+              className="flex h-8 items-center gap-1 rounded-lg px-2 text-[11px] font-medium transition-all hover:scale-105 active:scale-95 disabled:opacity-40"
+              style={{
+                background: loopQueueActive ? "rgba(var(--theme-accent-rgb, 128,128,128), 0.15)" : "transparent",
+                color: loopQueueActive ? "var(--theme-accent)" : "var(--muted-foreground)",
+                border: loopQueueActive ? "1px solid rgba(var(--theme-accent-rgb, 128,128,128), 0.3)" : "1px solid transparent",
+              }}
+              title={loopQueueActive ? "Disable queue loop" : "Enable queue loop"}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>
+              <span className="hidden sm:inline">Q</span>
+            </button>
+
+            {/* Prev */}
+            <button
+              disabled={isDisabled}
+              onClick={() => sendCommand("prev")}
+              className="flex h-9 w-9 items-center justify-center rounded-full transition-all hover:scale-110 active:scale-90 disabled:opacity-40"
+              style={{ color: "var(--foreground)" }}
+              title="Previous"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6V6zm3.5 6l8.5 6V6l-8.5 6z"/></svg>
+            </button>
+
+            {/* Play / Pause — center, largest */}
+            <button
+              disabled={isDisabled}
+              onClick={() => sendCommand(isPlaying ? "pause" : "resume")}
+              className="flex h-12 w-12 items-center justify-center rounded-full transition-all hover:scale-105 active:scale-90 disabled:opacity-40 disabled:hover:scale-100 shadow-lg"
+              style={{ background: "var(--theme-accent)", color: "var(--theme-accent-contrast)" }}
+              title={isPlaying ? "Pause" : "Resume"}
+            >
+              {isPlaying ? (
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
+              ) : (
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.14v14l11-7-11-7z"/></svg>
+              )}
+            </button>
+
+            {/* Next */}
+            <button
+              disabled={isDisabled}
+              onClick={() => sendCommand("skip")}
+              className="flex h-9 w-9 items-center justify-center rounded-full transition-all hover:scale-110 active:scale-90 disabled:opacity-40"
+              style={{ color: "var(--foreground)" }}
+              title="Next"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M16 6h2v12h-2V6zM6 18l8.5-6L6 6v12z"/></svg>
+            </button>
+
+            {/* Stop */}
+            <button
+              disabled={isDisabled}
+              onClick={() => sendCommand("stop")}
+              className="flex h-9 w-9 items-center justify-center rounded-full transition-all hover:scale-110 active:scale-90 disabled:opacity-40"
+              style={{ color: "var(--foreground)" }}
+              title="Stop"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+            </button>
+
+            {/* Lyrics */}
+            <button
+              disabled={isDisabled}
+              onClick={() => sendCommand("lyrics")}
+              className="flex h-8 items-center gap-1 rounded-lg px-2 text-[11px] font-medium transition-all hover:scale-105 active:scale-95 disabled:opacity-40"
+              style={{ color: "var(--muted-foreground)", border: "1px solid transparent" }}
+              title="Show lyrics"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+              <span className="hidden sm:inline">Lyrics</span>
+            </button>
+
+            {/* Filter */}
+            <div className="relative">
+              <button
+                disabled={isDisabled}
+                onClick={() => setShowFilter(!showFilter)}
+                className="flex h-8 items-center gap-1 rounded-lg px-2 text-[11px] font-medium transition-all hover:scale-105 active:scale-95 disabled:opacity-40"
+                style={{
+                  background: filter ? "rgba(var(--theme-accent-rgb, 128,128,128), 0.15)" : "transparent",
+                  color: filter ? "var(--theme-accent)" : "var(--muted-foreground)",
+                  border: filter ? "1px solid rgba(var(--theme-accent-rgb, 128,128,128), 0.3)" : "1px solid transparent",
+                }}
+                title="Audio filter"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z"/></svg>
+                <span className="hidden sm:inline">{filter || "Filter"}</span>
+              </button>
+              {showFilter && (
+                <div
+                  className="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 z-50 w-44 rounded-xl border p-1.5 shadow-xl"
+                  style={{ background: "var(--surface-1)", borderColor: "var(--border-subtle)" }}
+                >
+                  {FILTERS.map((f) => (
+                    <button
+                      key={f.value}
+                      onClick={() => {
+                        sendCommand("filter", { filter: f.value || null });
+                        setShowFilter(false);
+                      }}
+                      className="flex w-full items-center rounded-lg px-3 py-1.5 text-left text-xs font-medium transition-colors hover:bg-white/5"
+                      style={{
+                        color: filter === f.value || (!filter && !f.value) ? "var(--theme-accent)" : "var(--foreground)",
+                      }}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
