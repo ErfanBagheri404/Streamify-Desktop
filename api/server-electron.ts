@@ -10,6 +10,20 @@ import runtimeConfig from "./runtime-config.json";
 
 export type RunningApiServer = { port: number; close: () => Promise<void> };
 
+// Serve the same JSON shape the app expects from PROVIDER_ENDPOINTS_URL
+// (https://instances.helloify.workers.dev/config, now 403/dead). The bundled
+// snapshot carries instances/providers/headers, so /config is a pure local read.
+function configPayload(): Response {
+  return new Response(JSON.stringify(runtimeConfig), {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control": "public, max-age=300",
+    },
+  });
+}
+
 function getEnv() {
   return {
     CONFIG_URL: process.env.CONFIG_URL,
@@ -60,6 +74,16 @@ export async function startApiServer(
 ): Promise<RunningApiServer> {
   const server = http.createServer(async (req, res) => {
     try {
+      // Local-only endpoint: the app fetches provider endpoints from here so it
+      // never needs the (dead) instances.helloify.workers.dev/config host.
+      if ((req.url || "").split("?")[0] === "/config") {
+        const response = configPayload();
+        res.statusCode = response.status;
+        response.headers.forEach((value, key) => res.setHeader(key, value));
+        res.end(await response.text());
+        return;
+      }
+
       const method = req.method || "GET";
       const hasBody = !["GET", "HEAD"].includes(method);
       const requestInit: RequestInit & { duplex?: "half" } = {
@@ -117,13 +141,10 @@ export async function startApiServer(
   };
 }
 
-// Standalone run: `node dist/api-server.mjs`. Bundlers rewrite argv paths,
-// so we compare normalized paths; on miss we still run when STREAMIFY_API_STANDALONE=1.
-const invoked = (process.argv[1] || "").replace(/\\/g, "/");
-const here = import.meta.url.replace(/^file:\/\/+/, "").replace(/\\/g, "/");
-const isDirect = invoked.length > 0 && (here.startsWith(invoked) || invoked.startsWith(here));
-
-if (isDirect || process.env.STREAMIFY_API_STANDALONE === "1") {
+// Standalone run only when explicitly asked (`STREAMIFY_API_STANDALONE=1`).
+// Electron imports this module and calls startApiServer() itself; auto-starting
+// on import would bind the port twice.
+if (process.env.STREAMIFY_API_STANDALONE === "1") {
   startApiServer().catch((err) => {
     console.error("[api] failed to start:", err);
     process.exit(1);

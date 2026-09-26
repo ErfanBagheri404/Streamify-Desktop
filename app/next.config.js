@@ -11,6 +11,9 @@ const backendApiEnv = {
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // Desktop: the repo root has its own package-lock.json, so Next would
+  // otherwise infer the wrong workspace root and fail to find app/.
+  outputFileTracingRoot: __dirname,
   env: backendApiEnv,
   images: {
     remotePatterns: [
