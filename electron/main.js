@@ -11,7 +11,10 @@ const {
   BrowserWindow,
   shell,
   Menu,
+  Tray,
   globalShortcut,
+  ipcMain,
+  nativeImage,
   nativeTheme,
 } = require("electron");
 const path = require("path");
@@ -31,6 +34,7 @@ const ROOT = path.join(__dirname, "..");
 let mainWindow = null;
 let nextProc = null;
 let apiServer = null;
+let tray = null;
 let isQuitting = false;
 // window-all-closed fires when the splash is destroyed mid-boot, which would
 // quit the app before the real window exists.
@@ -236,11 +240,15 @@ function createWindow() {
   return mainWindow;
 }
 
-// ---- menu + media keys -----------------------------------------------------
+// ---- menu + media keys + tray ---------------------------------------------
 function send(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(channel, payload);
   }
+}
+
+function sendCommand(command) {
+  send("desktop:command", command);
 }
 
 function buildMenu() {
@@ -248,7 +256,7 @@ function buildMenu() {
     {
       label: "File",
       submenu: [
-        { label: "Show Window", accelerator: "CmdOrCtrl+Shift+S", click: () => mainWindow?.show() },
+        { label: "Show Window", accelerator: "CmdOrCtrl+Shift+S", click: () => showWindow() },
         { type: "separator" },
         { role: "quit", accelerator: "CmdOrCtrl+Q" },
       ],
@@ -257,7 +265,7 @@ function buildMenu() {
       label: "View",
       submenu: [
         isDev ? { role: "toggleDevTools" } : null,
-        { type: "separator" },
+        isDev ? { type: "separator" } : null,
         { role: "resetZoom" },
         { role: "zoomIn" },
         { role: "zoomOut" },
@@ -268,9 +276,9 @@ function buildMenu() {
     {
       label: "Playback",
       submenu: [
-        { label: "Play / Pause", accelerator: "MediaPlayPause", click: () => send("media-key", "play-pause") },
-        { label: "Next", accelerator: "MediaNextTrack", click: () => send("media-key", "next") },
-        { label: "Previous", accelerator: "MediaPreviousTrack", click: () => send("media-key", "previous") },
+        { label: "Play / Pause", accelerator: "MediaPlayPause", click: () => sendCommand("play-pause") },
+        { label: "Next", accelerator: "MediaNextTrack", click: () => sendCommand("next") },
+        { label: "Previous", accelerator: "MediaPreviousTrack", click: () => sendCommand("previous") },
       ],
     },
     {
@@ -286,20 +294,81 @@ function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+function showWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+// Closing the window hides it instead of quitting (playback survives), so the
+// tray is the only way back for users who don't know the shortcut.
+function createTray() {
+  const icon = nativeImage.createFromPath(iconPath());
+  tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon.resize({ width: 16, height: 16 }));
+  tray.setToolTip("Streamify Desktop");
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: "Show Streamify", click: () => showWindow() },
+      { type: "separator" },
+      { label: "Play / Pause", click: () => sendCommand("play-pause") },
+      { label: "Next", click: () => sendCommand("next") },
+      { label: "Previous", click: () => sendCommand("previous") },
+      { type: "separator" },
+      {
+        label: "Quit",
+        click: () => {
+          isQuitting = true;
+          app.quit();
+        },
+      },
+    ])
+  );
+  tray.on("click", () => showWindow());
+}
+
+// The app owns its own theme (SettingsContext writes data-theme); the native
+// frame, tray and dialogs should follow it instead of being pinned to dark.
+ipcMain.on("desktop:theme", (_event, theme) => {
+  const light =
+    theme === "light" ||
+    (theme !== "dark" && nativeTheme.shouldUseDarkColors === false);
+  nativeTheme.themeSource = light ? "light" : "dark";
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setBackgroundColor(light ? "#ffffff" : "#000000");
+  }
+});
+
+// Dev-only: remote debugging port so the UI can be driven and inspected.
+// commandLine switches must be set before the app is ready; the env var is
+// only ever set by a developer's shell, never in a packaged build.
+if (isDev && process.env.STREAMIFY_DEBUG_PORT) {
+  app.commandLine.appendSwitch("remote-debugging-port", process.env.STREAMIFY_DEBUG_PORT);
+}
+
 // ---- boot ------------------------------------------------------------------
 async function boot() {
   await app.whenReady();
   bootLog(`[boot] app-ready dev=${isDev} apiPort=${API_PORT} appPort=${APP_PORT}`);
   nativeTheme.themeSource = "dark";
   buildMenu();
+  createTray();
 
-  for (const key of ["MediaPlayPause", "MediaNextTrack", "MediaPreviousTrack"]) {
-    const action =
-      key === "MediaPlayPause" ? "play-pause" : key === "MediaNextTrack" ? "next" : "previous";
+  for (const [key, action] of [
+    ["MediaPlayPause", "play-pause"],
+    ["MediaNextTrack", "next"],
+    ["MediaPreviousTrack", "previous"],
+  ]) {
     try {
-      globalShortcut.register(key, () => send("media-key", action));
+      globalShortcut.register(key, () => sendCommand(action));
     } catch {}
   }
+
+  // Dev-only: remote debugging port so the UI can be driven and inspected.
+  // Never set in a packaged build (kept only as a reminder of the switch name).
 
   const splash = createSplash();
 

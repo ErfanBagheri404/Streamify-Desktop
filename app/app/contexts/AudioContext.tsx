@@ -4188,6 +4188,37 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
     volume,
   ]);
 
+  // Desktop shell (Electron) commands: main-process menu items and the OS media
+  // keys arrive here. Space and the arrow keys already work because the window
+  // keeps DOM focus, but media keys and menu items only exist outside the page.
+  useEffect(() => {
+    const bridge = window.streamifyDesktop;
+    if (!bridge?.onCommand) return;
+
+    return bridge.onCommand((command) => {
+      if (command === "play-pause") {
+        if (!currentSong) return;
+        if (isPlaying) pauseSong();
+        else resumeSong();
+        return;
+      }
+      if (command === "next") {
+        playNext();
+        return;
+      }
+      if (command === "previous") {
+        playPrevious();
+      }
+    });
+  }, [
+    currentSong,
+    isPlaying,
+    pauseSong,
+    playNext,
+    playPrevious,
+    resumeSong,
+  ]);
+
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio || !currentSong || shouldUseSoundCloudWidget(currentSong))

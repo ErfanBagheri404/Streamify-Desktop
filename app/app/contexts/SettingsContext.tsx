@@ -71,6 +71,9 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     root.style.colorScheme = themeMode;
     root.classList.toggle("reduce-motion", settings.disableAnimations);
 
+    // Desktop shell: keep the native window frame in sync with the app theme.
+    window.streamifyDesktop?.setTheme?.(themeMode);
+
     return () => {
       root.classList.remove("reduce-motion");
       delete root.dataset.theme;
