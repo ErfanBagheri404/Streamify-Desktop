@@ -1,0 +1,210 @@
+{
+  "schemaVersion": 1,
+  "app": {
+    "name": "Streamify",
+    "env": "production",
+    "version": "1",
+    "updatedAt": "2026-09-26T14:40:36.077Z",
+    "siteUrl": "",
+    "origin": ""
+  },
+  "api": {
+    "mode": "same-origin",
+    "baseUrl": "",
+    "allowedOrigins": [
+      "http://localhost:3000",
+      "http://127.0.0.1:3000",
+      "https://streamifypreview.vercel.app",
+      "https://streamify-player.netlify.app",
+      "https://streamify-player.vercel.app"
+    ],
+    "absoluteRoutes": [
+      "/video",
+      "/audio-proxy",
+      "/license-proxy",
+      "/search",
+      "/artist",
+      "/collection",
+      "/lyrics"
+    ],
+    "proxy": {
+      "allowedAudioHosts": [
+        "googlevideo.com",
+        "sndcdn.com",
+        "media-streaming.soundcloud.cloud",
+        "media-streaming.soundcloud.com",
+        "saavncdn.com"
+      ],
+      "allowedLicenseHosts": [
+        "license.media-streaming.soundcloud.cloud",
+        "license.media-streaming.soundcloud.com"
+      ]
+    }
+  },
+  "instances": {
+    "client": {
+      "piped": [
+        "https://api.piped.private.coffee"
+      ],
+      "invidious": [
+        "https://yt.omada.cafe",
+        "https://invidious.schenkel.eti.br",
+        "https://invidious.kemonomimi.nl",
+        "https://lekker.gay"
+      ]
+    },
+    "server": {
+      "localProxyBase": "http://127.0.0.1:8085",
+      "localExpressApiUrl": "http://localhost:3001",
+      "localAllowedClientOrigin": "http://localhost:3000"
+    }
+  },
+  "providers": {
+    "search": {
+      "ytifyInstance": "https://api.ytify.workers.dev",
+      "searchBackendUrl": "",
+      "soundcloudSearchProxyBase": "https://proxy.searchsoundcloud.com"
+    },
+    "jiosaavn": {
+      "apiBase": "https://streamifyjiosaavn.vercel.app",
+      "fallbackSearchBase": "https://jiosaavn-api.vercel.app",
+      "webOrigin": "https://www.jiosaavn.com"
+    },
+    "beatseek": {
+      "apiBase": "https://beatseek.io/api"
+    },
+    "lyrics": {
+      "lrclibBase": "https://lrclib.net/api",
+      "lyricsOvhBase": "https://api.lyrics.ovh/v1"
+    },
+    "soundcloud": {
+      "clientId": "",
+      "origin": "https://soundcloud.com",
+      "mobileOrigin": "https://m.soundcloud.com",
+      "apiBase": "https://api.soundcloud.com",
+      "apiV2Base": "https://api-v2.soundcloud.com",
+      "widgetBase": "https://w.soundcloud.com",
+      "licenseBase": "https://license.media-streaming.soundcloud.cloud",
+      "oembedBase": "https://soundcloud.com/oembed"
+    },
+    "youtube": {
+      "webBase": "https://www.youtube.com",
+      "musicBase": "https://music.youtube.com",
+      "oembedBase": "https://www.youtube.com/oembed",
+      "imageBase": "https://i.ytimg.com"
+    },
+    "supabase": {
+      "url": ""
+    },
+    "mobile": {
+      "androidAppUrl": "https://github.com/ErfanBagheri404/Streamify/"
+    }
+  },
+  "headers": {
+    "origins": {
+      "soundcloud": "https://soundcloud.com",
+      "youtube": "https://www.youtube.com",
+      "jiosaavn": "https://www.jiosaavn.com"
+    },
+    "referers": {
+      "soundcloud": "https://soundcloud.com/",
+      "youtube": "https://www.youtube.com/",
+      "jiosaavn": "https://www.jiosaavn.com/"
+    }
+  },
+  "curated": {
+    "categoryPlaylists": [
+      {
+        "category": "Alternative",
+        "title": "Greatest Alternative Rock Songs of All Time",
+        "source": "soundcloud",
+        "playlistUrl": "https://soundcloud.com/storemusic-974485696/sets/top-alternative-rock-songs-the"
+      },
+      {
+        "category": "Electronic",
+        "title": "Monstercat Best of EDM",
+        "source": "soundcloud",
+        "playlistUrl": "https://soundcloud.com/monstercat/sets/instinct"
+      },
+      {
+        "category": "Heavy Metal",
+        "title": "Heavy Metal Classics",
+        "source": "soundcloud",
+        "playlistUrl": "https://soundcloud.com/earsplit/sets/heavy-metal"
+      },
+      {
+        "category": "Hip-Hop",
+        "title": "Hip Hop Hits",
+        "source": "soundcloud",
+        "playlistUrl": "https://soundcloud.com/rapcaviar/sets/hip-hop-hits"
+      },
+      {
+        "category": "Jazz",
+        "title": "Jazz Classics",
+        "source": "soundcloud",
+        "playlistUrl": "https://soundcloud.com/jazzhopcafe/sets/jazzhop-essentials"
+      },
+      {
+        "category": "K-Pop",
+        "title": "K-Pop Daebak",
+        "source": "soundcloud",
+        "playlistUrl": "https://soundcloud.com/kpop-playlists/sets/kpop-hits"
+      },
+      {
+        "category": "LO-FI",
+        "title": "Lofi Hip Hop Radio Playlist",
+        "source": "soundcloud",
+        "playlistUrl": "https://soundcloud.com/chilledcow/sets/lofi-hip-hop"
+      },
+      {
+        "category": "Metal",
+        "title": "Metal Essentials",
+        "source": "soundcloud",
+        "playlistUrl": "https://soundcloud.com/earsplit/sets/metal"
+      },
+      {
+        "category": "OST",
+        "title": "Best Video Game Music",
+        "source": "soundcloud",
+        "playlistUrl": "https://soundcloud.com/rage-remix/sets/game-soundtracks"
+      },
+      {
+        "category": "Persian",
+        "title": "Persian Music Hits",
+        "source": "soundcloud",
+        "playlistUrl": "https://soundcloud.com/persian-music/sets/persian-hits"
+      },
+      {
+        "category": "Phonk",
+        "title": "Drift Phonk",
+        "source": "soundcloud",
+        "playlistUrl": "https://soundcloud.com/phonk/sets/drift-phonk"
+      },
+      {
+        "category": "Pop",
+        "title": "Today's Top Pop",
+        "source": "soundcloud",
+        "playlistUrl": "https://soundcloud.com/topsify/sets/pop-hits"
+      },
+      {
+        "category": "R&B",
+        "title": "R&B Essentials",
+        "source": "soundcloud",
+        "playlistUrl": "https://soundcloud.com/rnb/sets/rnb-essentials"
+      },
+      {
+        "category": "Rock",
+        "title": "Classic Rock Greatest Hits",
+        "source": "soundcloud",
+        "playlistUrl": "https://soundcloud.com/storemusic-974485696/sets/alternative-rock-playlist"
+      },
+      {
+        "category": "Synthwave",
+        "title": "Synthwave & Retrowave",
+        "source": "soundcloud",
+        "playlistUrl": "https://soundcloud.com/theociderecords/sets/best-of-synthwave"
+      }
+    ]
+  },
+  "extra": {}
+}
