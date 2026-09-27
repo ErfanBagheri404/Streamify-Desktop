@@ -14,6 +14,10 @@ const nextConfig = {
   // Desktop: the repo root has its own package-lock.json, so Next would
   // otherwise infer the wrong workspace root and fail to find app/.
   outputFileTracingRoot: __dirname,
+  // Desktop: `next start` runs from the packaged resources dir, where there is
+  // no node_modules. Standalone output copies only the files Next actually
+  // needs, so the installer stays small and the app has no runtime deps.
+  output: "standalone",
   env: backendApiEnv,
   images: {
     remotePatterns: [

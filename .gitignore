@@ -3,6 +3,9 @@ dist/
 build/
 .next/
 out/
+release/
+release.old/
+.logs/
 *.log
 .DS_Store
 .env*.local
