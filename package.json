@@ -10,9 +10,10 @@
     "dev": "cross-env NODE_ENV=development concurrently -k -n api,next,electron \"node scripts/dev-api.mjs\" \"npm run dev --prefix app\" \"wait-on tcp:7861 tcp:3000 && electron .\"",
     "dev:app": "npm run dev --prefix app",
     "dev:api": "node scripts/dev-api.mjs",
-    "build:api": "esbuild api-server.mjs --bundle --platform=node --format=esm --outfile=dist/api-server.mjs",
-    "build:app": "npm run build --prefix app",
+    "build:api": "esbuild api/server-electron.ts --bundle --platform=node --format=esm --outfile=dist/api-server.mjs",
+    "build:app": "npm run build --prefix app && node scripts/prepare-standalone.mjs",
     "build": "npm run build:api && npm run build:app",
+    "icon": "node scripts/make-icon.mjs",
     "start": "npm run start:api & npm run start:app && electron . --prod",
     "start:app": "npm run start --prefix app",
     "start:api": "node dist/api-server.mjs",
@@ -20,6 +21,68 @@
     "dist:dir": "npm run build && electron-builder --dir",
     "lint": "eslint",
     "check": "tsc --noEmit -p api/tsconfig.json"
+  },
+  "build": {
+    "appId": "com.streamify.desktop",
+    "productName": "Streamify Desktop",
+    "copyright": "Copyright © 2026 Streamify",
+    "directories": {
+      "output": "release",
+      "buildResources": "build",
+      "app": "."
+    },
+    "files": [
+      "electron/**/*",
+      "dist/**/*",
+      "splash.html",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "resources/app/**"
+    ],
+    "afterPack": "scripts/after-pack.cjs",
+    "extraResources": [
+      {
+        "from": "app/.next/standalone",
+        "to": "app",
+        "filter": [
+          "**/*",
+          "!.env.local",
+          "!public/**/*"
+        ]
+      },
+      {
+        "from": "app/.next/static",
+        "to": "app/.next/static",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "app/public",
+        "to": "app/public",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "app/.env.local",
+        "to": "app/.env.local"
+      }
+    ],
+    "win": {
+      "target": ["nsis", "portable"],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "Streamify Desktop"
+    },
+    "portable": {
+      "artifactName": "Streamify-Desktop-Portable-${version}.exe"
+    }
   },
   "devDependencies": {
     "concurrently": "^9.2.1",
