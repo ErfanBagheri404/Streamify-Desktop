@@ -35,6 +35,7 @@ for (const [from, to] of steps) {
 }
 
 const envFile = path.join(root, "app", ".env.local");
+const envFallback = path.join(root, "app", ".env.local.template");
 if (existsSync(envFile)) {
   // In dev the Next dev server may hold this file open (EBUSY on Windows),
   // and the dev app never reads it here — main.js loads it from app/.env.local.
@@ -49,6 +50,12 @@ if (existsSync(envFile)) {
       throw e;
     }
   }
+} else if (existsSync(envFallback)) {
+  // Clean clone: no secrets needed for a build, the template's desktop
+  // defaults are enough.
+  copyFileSync(envFallback, envFile);
+  copyFileSync(envFallback, path.join(standalone, ".env.local"));
+  console.log("no app/.env.local — created it from app/.env.local.template (desktop defaults)");
 } else {
   console.log("no app/.env.local (server-side routes will run without secrets)");
 }

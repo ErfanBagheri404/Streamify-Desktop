@@ -8,6 +8,7 @@ import LeftPanel from "./LeftPanel";
 import MobileAppGate from "./MobileAppGate";
 import PageTitle from "./PageTitle";
 import ShellLayout from "./ShellLayout";
+import UpdateModal from "./UpdateModal";
 import { isStandaloneAuthPath } from "../lib/auth-routes";
 import { AudioProvider } from "../contexts/AudioContext";
 import { SettingsProvider } from "../contexts/SettingsContext";
@@ -41,6 +42,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             <CommunityBanner />
             <LeftPanel />
             <ShellLayout>{children}</ShellLayout>
+            <UpdateModal />
           </SidePanelProvider>
         </AudioProvider>
       </ToastProvider>

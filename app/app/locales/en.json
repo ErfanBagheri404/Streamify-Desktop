@@ -504,5 +504,21 @@
   "mobileGate.repoLabel": "Android app repository",
   "mobileGate.downloadButton": "View Latest Release",
   "mobileGate.enterButton": "Continue in Browser",
-  "mobileGate.footer": "You can still use the web app in your browser if you prefer."
+  "mobileGate.footer": "You can still use the web app in your browser if you prefer.",
+  "update.availableTitle": "Update available",
+  "update.availableDescription": "Streamify Desktop {version} is ready to download. You are on {current}.",
+  "update.releaseNotes": "What's new",
+  "update.updateButton": "Update now",
+  "update.laterButton": "Later",
+  "update.downloadingTitle": "Downloading update",
+  "update.downloadingDescription": "Downloading Streamify Desktop {version}…",
+  "update.readyTitle": "Update ready",
+  "update.readyDescription": "Streamify Desktop {version} has been downloaded. Restart to finish updating.",
+  "update.restartButton": "Restart and update",
+  "update.checking": "Checking for updates…",
+  "update.upToDate": "You're on the latest version.",
+  "update.errorTitle": "Update failed",
+  "update.errorDescription": "Could not update automatically. You can download the new version from the releases page.",
+  "update.openReleases": "Open releases page",
+  "update.checkAction": "Check for updates"
 }

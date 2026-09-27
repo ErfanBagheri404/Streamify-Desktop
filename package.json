@@ -2,7 +2,7 @@
   "name": "streamify-desktop",
   "version": "0.1.0",
   "private": true,
-  "description": "Streamify Desktop - Electron wrapper for streamifyweb-player with in-process streamifyapi",
+  "description": "Streamify Desktop - native music player for Windows, macOS and Linux",
   "main": "electron/main.js",
   "author": "Streamify",
   "license": "UNLICENSED",
@@ -71,7 +71,10 @@
       }
     ],
     "win": {
-      "target": ["nsis", "portable"],
+      "target": [
+        "nsis",
+        "portable"
+      ],
       "icon": "build/icon.png"
     },
     "nsis": {
@@ -82,6 +85,38 @@
     },
     "portable": {
       "artifactName": "Streamify-Desktop-Portable-${version}.exe"
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "icon": "build/icon.png",
+      "category": "public.app-category.music",
+      "identity": null
+    },
+    "dmg": {
+      "artifactName": "Streamify-Desktop-${version}-macOS.dmg"
+    },
+    "linux": {
+      "target": [
+        "deb",
+        "appimage"
+      ],
+      "icon": "build/icon.png",
+      "category": "Audio",
+      "maintainer": "Erfan Bagheri"
+    },
+    "deb": {
+      "artifactName": "Streamify-Desktop-${version}-linux.deb"
+    },
+    "appImage": {
+      "artifactName": "Streamify-Desktop-${version}-linux.AppImage"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "ErfanBagheri404",
+      "repo": "Streamify-Desktop"
     }
   },
   "devDependencies": {
@@ -96,5 +131,8 @@
     "electron@35.7.5": true,
     "esbuild@0.25.12": true,
     "electron-winstaller@5.4.0": true
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
   }
 }

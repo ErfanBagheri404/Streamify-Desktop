@@ -11,8 +11,25 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("streamifyDesktop", {
   platform: process.platform,
   isDesktop: true,
+  version: ipcRenderer.sendSync("desktop:app-info").version,
   setTheme: (theme) => ipcRenderer.send("desktop:theme", theme),
   onCommand: (callback) => {
     ipcRenderer.on("desktop:command", (_event, command) => callback(command));
+  },
+  // Self-update flow: main owns electron-updater, renderer owns the modal.
+  update: {
+    check: () => ipcRenderer.send("desktop:update-check"),
+    download: () => ipcRenderer.send("desktop:update-download"),
+    install: () => ipcRenderer.send("desktop:update-install"),
+    onAvailable: (callback) =>
+      ipcRenderer.on("desktop:update-available", (_event, info) => callback(info)),
+    onProgress: (callback) =>
+      ipcRenderer.on("desktop:update-progress", (_event, info) => callback(info)),
+    onDownloaded: (callback) =>
+      ipcRenderer.on("desktop:update-downloaded", (_event, info) => callback(info)),
+    onNotAvailable: (callback) =>
+      ipcRenderer.on("desktop:update-not-available", () => callback()),
+    onError: (callback) =>
+      ipcRenderer.on("desktop:update-error", (_event, info) => callback(info)),
   },
 });

@@ -25,6 +25,15 @@ const { pathToFileURL } = require("url");
 
 const isProd = app.isPackaged || process.env.NODE_ENV === "production";
 const isDev = !isProd;
+// Self-update runs only in the packaged app: dev has no published release to
+// compare against, and electron-updater would just error.
+const canSelfUpdate = app.isPackaged;
+
+// The renderer needs its own version to show "you are on X" in the update
+// modal; the preload asks for it synchronously before the bridge is exposed.
+ipcMain.on("desktop:app-info", (event) => {
+  event.returnValue = { version: app.getVersion() };
+});
 const API_PORT = Number(process.env.STREAMIFY_API_PORT || 7861);
 const APP_PORT = Number(process.env.STREAMIFY_APP_PORT || 3000);
 // The renderer talks to localhost (matches NEXT_PUBLIC_SITE_URL and the
@@ -336,6 +345,101 @@ function showWindow() {
   mainWindow.focus();
 }
 
+// ---- self-update (electron-updater, GitHub releases feed) -------------------
+// The modal lives in the renderer (UpdateModal.tsx); main only shuttles
+// electron-updater events over IPC. autoDownload is off on purpose: the user
+// sees the new version first and explicitly clicks Update. The installer/portable
+// trade-off is inherited from electron-updater: NSIS updates silently, portable
+// downloads the new exe, everything else (dmg/zip/deb/AppImage) notifies and
+// links the release page.
+let updateDownloadedVersion = null;
+
+function forwardUpdate(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(channel, payload);
+  }
+}
+
+function wireSelfUpdate() {
+  if (!canSelfUpdate) return;
+  let updater;
+  try {
+    ({ autoUpdater: updater } = require("electron-updater"));
+  } catch (error) {
+    bootLog(`[update] electron-updater unavailable: ${error && error.message}`);
+    return;
+  }
+  updater.autoDownload = false;
+  updater.autoInstallOnAppQuit = false;
+
+  updater.on("update-available", (info) => {
+    bootLog(`[update] available ${info && info.version}`);
+    forwardUpdate("desktop:update-available", {
+      version: info && info.version,
+      releaseDate: info && info.releaseDate,
+      releaseNotes: releaseNotesText(info),
+    });
+  });
+  updater.on("update-not-available", () => {
+    forwardUpdate("desktop:update-not-available");
+  });
+  updater.on("download-progress", (progress) => {
+    forwardUpdate("desktop:update-progress", {
+      percent: progress && progress.percent,
+      transferred: progress && progress.transferred,
+      total: progress && progress.total,
+    });
+  });
+  updater.on("update-downloaded", (info) => {
+    updateDownloadedVersion = (info && info.version) || null;
+    bootLog(`[update] downloaded ${updateDownloadedVersion}`);
+    forwardUpdate("desktop:update-downloaded", { version: updateDownloadedVersion });
+  });
+  updater.on("error", (error) => {
+    bootLog(`[update] error ${error && error.message}`);
+    forwardUpdate("desktop:update-error", { message: (error && error.message) || "update failed" });
+  });
+
+  ipcMain.on("desktop:update-check", () => {
+    if (!canSelfUpdate) return;
+    bootLog("[update] manual check");
+    void updater.checkForUpdates();
+  });
+  ipcMain.on("desktop:update-download", () => {
+    if (!canSelfUpdate) return;
+    bootLog("[update] user started download");
+    void updater.downloadUpdate();
+  });
+  ipcMain.on("desktop:update-install", () => {
+    if (!canSelfUpdate || !updateDownloadedVersion) return;
+    bootLog("[update] user confirmed install — quitting to update");
+    isQuitting = true;
+    updater.quitAndInstall(false, true);
+  });
+
+  // One silent check shortly after boot; the user still explicitly clicks
+  // Update in the modal before anything downloads or installs.
+  setTimeout(() => {
+    bootLog("[update] scheduled check");
+    void updater.checkForUpdates();
+  }, 15000);
+}
+
+function releaseNotesText(info) {
+  if (!info) return null;
+  const notes = info.releaseNotes;
+  if (!notes) return null;
+  if (typeof notes === "string") return notes.slice(0, 2000);
+  if (Array.isArray(notes)) {
+    return notes
+      .map((entry) => (entry && entry.note ? String(entry.note) : ""))
+      .filter(Boolean)
+      .join("\n\n")
+      .slice(0, 2000);
+  }
+  return null;
+}
+
 // Closing the window hides it instead of quitting (playback survives), so the
 // tray is the only way back for users who don't know the shortcut.
 function createTray() {
@@ -422,6 +526,7 @@ async function boot() {
   mainWindow = null;
   isBooting = false;
   bootLog("[boot] ready — opening main window");
+  wireSelfUpdate();
   createWindow();
 }
 

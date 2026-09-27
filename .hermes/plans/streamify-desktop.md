@@ -135,6 +135,17 @@ lyrics (timed + wrong-lyrics flow), audio-proxy streaming, local library import.
 - Final commit + push, verify remote tree
 - **Done:** repo README renders, `gh repo view` description set
 
+### Phase 9 — Cross-platform CI + auto-update ✅ *(Depends: 8)*
+- `.github/workflows/build.yml`: 3-platform matrix (Windows NSIS+portable, macOS universal dmg+zip, Linux deb+AppImage)
+- `electron-updater` in main process: silent check on boot → modal in renderer → download → restart-and-install
+- `UpdateModal.tsx` wired into `AppShell`, i18n keys in `en.json`/`fa.json`
+- electron-builder `publish` config (GitHub provider) so `latest*.yml` lands on the `v<version>` release
+- Auto-tag job creates `v<version>` from `package.json` on every main push (skips if unchanged)
+- CI fixes: `build/icon.png` tracked (was gitignored), `app/.env.local.template` committed + secret in CI, `app/node_modules` install step, `make-icon.mjs` cross-platform via `createRequire("electron")`
+- README rewritten in webplayer style (banner → badges → bilingual sections → downloads table)
+- Repo description + 17 topic tags set
+- **Done:** committed + pushed; CI triggered on main
+
 ## Parity checklist (Phase 6 gate)
 
 - [ ] Home loads with categories/recommendations

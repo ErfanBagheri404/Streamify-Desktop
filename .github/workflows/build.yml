@@ -1,0 +1,98 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows: NSIS installer + portable exe.
+          - os: windows-latest
+            platform: win
+            targets: --win nsis portable
+          # macOS ARM runner, universal dmg (arm64 + x64) + zip for portable use.
+          # macOS needs no signing for a working app (unsigned runs after the
+          # right-click > Open one-time gate); ad-hoc via "identity": null.
+          - os: macos-latest
+            platform: mac
+            targets: --mac dmg zip --universal
+          # Linux: deb installer + AppImage portable.
+          - os: ubuntu-latest
+            platform: linux
+            targets: --linux deb appimage
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm install
+      - run: npm install --prefix app
+
+      # CI keeps secrets here only; on push builds the secret is the real file,
+      # on PRs the template keeps the build working without exposing anything.
+      - name: Provide app/.env.local
+        shell: bash
+        run: |
+          if [ -n "${{ secrets.APP_ENV_LOCAL }}" ]; then
+            printf '%s' "${{ secrets.APP_ENV_LOCAL }}" > app/.env.local
+          else
+            echo "APP_ENV_LOCAL secret not set — using desktop defaults from template"
+          fi
+
+      - run: npm run build:api
+      - run: npm run build:app
+      - run: node scripts/make-icon.mjs
+
+      # Plain build on PRs / manual runs — artifacts attached to the workflow run.
+      - name: Build ${{ matrix.platform }}
+        if: github.event_name != 'push' || github.ref != 'refs/heads/main'
+        run: npx electron-builder ${{ matrix.targets }}
+
+      # Every main push ships: --publish always uploads installers + updater
+      # metadata (latest.yml / -mac / -linux) to the v<version> release, so the
+      # installed app's "Update now" flow always finds the newest build.
+      - name: Build + publish ${{ matrix.platform }}
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: npx electron-builder ${{ matrix.targets }} --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/upload-artifact@v4
+        if: github.event_name != 'push' || github.ref != 'refs/heads/main'
+        with:
+          name: ${{ matrix.platform }}-artifacts
+          path: release/
+          if-no-files-found: error
+
+  # Auto-tag v<version> from package.json on every main push (skips when the
+  # version wasn't bumped, so repeat pushes don't create empty releases).
+  tag:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag v<version> (skip when the tag already exists)
+        run: |
+          version=$(node -e "console.log(require('./package.json').version)")
+          tag="v$version"
+          if git ls-remote --tags origin "refs/tags/$tag" | grep -q "$tag"; then
+            echo "tag $tag already exists — skipping"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag "$tag"
+            git push origin "$tag"
+          fi

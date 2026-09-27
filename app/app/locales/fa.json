@@ -502,5 +502,21 @@
   "mobileGate.repoLabel": "مخزن اپلیکیشن اندروید",
   "mobileGate.downloadButton": "مشاهده آخرین نسخه",
   "mobileGate.enterButton": "ادامه در مرورگر",
-  "mobileGate.footer": "اگر ترجیح می‌دهید، می‌توانید همچنان از وب اپ در مرورگر خود استفاده کنید."
+  "mobileGate.footer": "اگر ترجیح می‌دهید، می‌توانید همچنان از وب اپ در مرورگر خود استفاده کنید.",
+  "update.availableTitle": "نسخه جدید موجود است",
+  "update.availableDescription": "Streamify Desktop {version} آماده دانلود است. نسخه فعلی شما {current} است.",
+  "update.releaseNotes": "تازه‌ها",
+  "update.updateButton": "به‌روزرسانی",
+  "update.laterButton": "بعداً",
+  "update.downloadingTitle": "در حال دانلود به‌روزرسانی",
+  "update.downloadingDescription": "در حال دانلود Streamify Desktop {version}…",
+  "update.readyTitle": "به‌روزرسانی آماده است",
+  "update.readyDescription": "Streamify Desktop {version} دانلود شد. برای تکمیل به‌روزرسانی، برنامه را دوباره اجرا کنید.",
+  "update.restartButton": "اجرای مجدد و به‌روزرسانی",
+  "update.checking": "در حال بررسی به‌روزرسانی…",
+  "update.upToDate": "شما آخرین نسخه را دارید.",
+  "update.errorTitle": "به‌روزرسانی ناموفق بود",
+  "update.errorDescription": "به‌روزرسانی خودکار ممکن نشد. می‌توانید نسخه جدید را از صفحه رلیزها دانلود کنید.",
+  "update.openReleases": "باز کردن صفحه رلیزها",
+  "update.checkAction": "بررسی به‌روزرسانی"
 }

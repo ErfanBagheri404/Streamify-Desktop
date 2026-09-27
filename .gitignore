@@ -1,6 +1,5 @@
 node_modules/
 dist/
-build/
 .next/
 out/
 release/
@@ -9,5 +8,6 @@ release.old/
 *.log
 .DS_Store
 .env*.local
-app/.env.local
+# Template is committed; real file is gitignored (copied by CI from secret)
+!app/.env.local.template
 *.tsbuildinfo

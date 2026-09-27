@@ -3,6 +3,7 @@
 // itself as the rasterizer, so the build needs no image toolchain.
 //   node scripts/make-icon.mjs
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import {
   mkdirSync,
   writeFileSync,
@@ -57,11 +58,15 @@ app.whenReady().then(async () => {
 `;
 writeFileSync(helperPath, helper);
 
-const proc = spawn(
-  path.join(root, "node_modules", "electron", "dist", "electron.exe"),
-  [helperPath],
-  { cwd: root, stdio: "inherit", windowsHide: true }
-);
+// `require("electron")` resolves to the platform's binary (electron.exe,
+// Electron.app/Contents/MacOS/Electron, electron), so this script runs on
+// Windows, macOS and Linux CI hosts unchanged.
+const electronBinary = createRequire(import.meta.url)("electron");
+const proc = spawn(electronBinary, [helperPath], {
+  cwd: root,
+  stdio: "inherit",
+  windowsHide: true,
+});
 const code = await new Promise((r) => proc.on("exit", r));
 if (code !== 0 || !existsSync(tmpFile) || statSync(tmpFile).size < 1000) {
   console.error(`icon render failed (exit ${code})`);
