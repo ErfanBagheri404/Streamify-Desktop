@@ -60,9 +60,13 @@ writeFileSync(helperPath, helper);
 
 // `require("electron")` resolves to the platform's binary (electron.exe,
 // Electron.app/Contents/MacOS/Electron, electron), so this script runs on
-// Windows, macOS and Linux CI hosts unchanged.
+// Windows, macOS and Linux CI hosts unchanged. On Linux CI the runner cannot
+// chown chrome-sandbox to root (mode 4755), so the sandbox must be off — the
+// window is offscreen and never renders untrusted content.
 const electronBinary = createRequire(import.meta.url)("electron");
-const proc = spawn(electronBinary, [helperPath], {
+const args = [helperPath];
+if (process.platform === "linux") args.push("--no-sandbox");
+const proc = spawn(electronBinary, args, {
   cwd: root,
   stdio: "inherit",
   windowsHide: true,
