@@ -8,7 +8,7 @@ const root = path.dirname(fileURLToPath(import.meta.url)) + "/..";
 
 const esbuild = spawn(
   "npx",
-  ["esbuild", "api-server.mjs", "--bundle", "--platform=node", "--format=esm", "--outfile=dist/api-server.mjs", "--watch"],
+  ["esbuild", "api/server-electron.ts", "--bundle", "--platform=node", "--format=esm", "--outfile=dist/api-server.mjs", "--watch"],
   { cwd: root, stdio: "inherit", shell: true }
 );
 
