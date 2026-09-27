@@ -23,13 +23,16 @@ const http = require("http");
 const { spawn } = require("child_process");
 const { pathToFileURL } = require("url");
 
-const isDev = process.env.NODE_ENV !== "production";
+const isProd = app.isPackaged || process.env.NODE_ENV === "production";
+const isDev = !isProd;
 const API_PORT = Number(process.env.STREAMIFY_API_PORT || 7861);
 const APP_PORT = Number(process.env.STREAMIFY_APP_PORT || 3000);
 // The renderer talks to localhost (matches NEXT_PUBLIC_SITE_URL and the
 // Supabase redirect allowlist), the in-process API to 127.0.0.1 (never exposed).
 const APP_ORIGIN = `http://localhost:${APP_PORT}`;
-const ROOT = path.join(__dirname, "..");
+// Packaged layout: electron-builder puts the Next app and the API bundle under
+// resources/ (asar-unpacked — Next needs real fs), the main process inside asar.
+const ROOT = app.isPackaged ? process.resourcesPath : path.join(__dirname, "..");
 
 let mainWindow = null;
 let nextProc = null;
@@ -117,7 +120,12 @@ function persistBounds() {
 
 // ---- in-process API --------------------------------------------------------
 async function startApi() {
-  const bundle = path.join(ROOT, "dist", "api-server.mjs");
+  // Packaged: main.js lives at app.asar/electron/main.js, so the bundle is at
+  // app.asar/dist/api-server.mjs (dynamic import works from inside asar).
+  // Dev: plain path under the repo root.
+  const bundle = app.isPackaged
+    ? path.join(__dirname, "..", "dist", "api-server.mjs")
+    : path.join(ROOT, "dist", "api-server.mjs");
   if (!fs.existsSync(bundle)) {
     throw new Error(`Missing ${bundle} — run "npm run build:api" first.`);
   }
@@ -137,20 +145,44 @@ async function startApi() {
 // ---- Next child process ----------------------------------------------------
 function startNext() {
   const appDir = path.join(ROOT, "app");
-  const nextBin = path.join(appDir, "node_modules", "next", "dist", "bin", "next");
 
   // No --hostname: Next then binds all interfaces, so both `localhost` (IPv6,
   // what the renderer and the Supabase redirect allowlist use) and `127.0.0.1`
   // (IPv4, what scripts use) resolve. `--hostname localhost` binds ::1 only.
-  nextProc = spawn(
-    process.execPath,
-    [nextBin, isDev ? "dev" : "start", "--webpack", "--port", String(APP_PORT)],
-    {
-      cwd: appDir,
+  //
+  // Production runs the standalone server (Next `output: "standalone"`), so the
+  // packaged app ships no node_modules. Dev keeps the `next dev` CLI.
+  // Both run under ELECTRON_RUN_AS_NODE, so no system Node is needed either.
+  //
+  // The two layouts differ: the repo keeps standalone at
+  // app/.next/standalone/server.js, while electron-builder flattens it to
+  // resources/app/server.js (see package.json extraResources). So pick by
+  // mode, not by sniffing — sniffing would also make dev silently serve the
+  // stale standalone build instead of hot-reloading.
+  const standaloneDir = app.isPackaged
+    ? appDir
+    : path.join(appDir, ".next", "standalone");
+  const standaloneServer = path.join(standaloneDir, "server.js");
+  const isStandalone = fs.existsSync(standaloneServer);
+  const args = isStandalone
+    ? [standaloneServer]
+    : [
+        path.join(appDir, "node_modules", "next", "dist", "bin", "next"),
+        // `next dev` needs the webpack flag (Next 16 defaults to turbopack);
+        // the standalone server needs no bundler flag at all.
+        "dev",
+        "--webpack",
+        "--port",
+        String(APP_PORT),
+      ];
+
+  nextProc = spawn(process.execPath, args, {
+      cwd: isStandalone ? standaloneDir : appDir,
       env: {
         ...process.env,
         NEXT_TELEMETRY_DISABLED: "1",
         PORT: String(APP_PORT),
+        HOSTNAME: "0.0.0.0",
         STREAMIFY_API_PORT: String(API_PORT),
         // Without this the Electron binary runs the script as another Electron
         // app instead of plain node — the packaged build needs no system Node.
@@ -167,7 +199,7 @@ function startNext() {
   nextProc.on("exit", (code, signal) => {
     bootLog(`[next:exit] code=${code} signal=${signal} quitting=${isQuitting}`);
   });
-  bootLog(`[next:spawn] ${process.execPath} ${nextBin} dev=${isDev} port=${APP_PORT}`);
+  bootLog(`[next:spawn] ${process.execPath} ${args.join(" ")} standalone=${isStandalone} port=${APP_PORT}`);
   return nextProc;
 }
 
@@ -345,7 +377,7 @@ ipcMain.on("desktop:theme", (_event, theme) => {
 // Dev-only: remote debugging port so the UI can be driven and inspected.
 // commandLine switches must be set before the app is ready; the env var is
 // only ever set by a developer's shell, never in a packaged build.
-if (isDev && process.env.STREAMIFY_DEBUG_PORT) {
+if (process.env.STREAMIFY_DEBUG_PORT) {
   app.commandLine.appendSwitch("remote-debugging-port", process.env.STREAMIFY_DEBUG_PORT);
 }
 
