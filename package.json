@@ -116,7 +116,8 @@
     "publish": {
       "provider": "github",
       "owner": "ErfanBagheri404",
-      "repo": "Streamify-Desktop"
+      "repo": "Streamify-Desktop",
+      "releaseType": "release"
     }
   },
   "devDependencies": {

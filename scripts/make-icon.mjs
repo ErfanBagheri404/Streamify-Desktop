@@ -20,6 +20,13 @@ const tmpFile = path.join(root, "build", "icon-raw.png");
 const helperPath = path.join(root, "build", "icon-helper.cjs");
 mkdirSync(path.join(root, "build"), { recursive: true });
 
+// If build/icon.png is already committed, skip rendering. Spawning Electron on
+// headless Linux CI fails without xvfb ($DISPLAY missing). Pass --force to re-render.
+if (existsSync(outFile) && statSync(outFile).size > 1000 && !process.argv.includes("--force")) {
+  console.log(`icon already exists at ${outFile} (${statSync(outFile).size} bytes) — skipping render`);
+  process.exit(0);
+}
+
 // The SVG is a white glyph with no background, and a transparent capture comes
 // out as solid black, so the page wrapper supplies the dark app background.
 const svgUrl = "file:///" + path.join(root, "app", "public", "StreamifyLogo.svg").split("\\").join("/");
