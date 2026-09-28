@@ -129,6 +129,10 @@ export default function AuthScreen({ mode }: AuthScreenProps) {
   const isForgotPassword = mode === "forgot-password";
   const isResetPassword = mode === "reset-password";
   const supabase = useMemo(() => getSupabaseBrowserClient(), []);
+  // Desktop never collects credentials: the webplayer owns the auth surface,
+  // so sign-in/sign-up happen in the OS browser and come back as a session.
+  const [desktopAuthAvailable, setDesktopAuthAvailable] = useState(false);
+  const [isDesktopAuthPending, setIsDesktopAuthPending] = useState(false);
   const authUnavailableMessage =
     "Authentication is unavailable until Supabase environment variables are configured.";
   const passwordTogglePositionClass = isRtl ? "left-0 pl-3" : "right-0 pr-3";
@@ -145,6 +149,57 @@ export default function AuthScreen({ mode }: AuthScreenProps) {
     const value = new URLSearchParams(window.location.search).get("auth_error");
     setAuthError(value);
   }, []);
+
+  // Desktop: wire the browser-mediated handoff. The main process owns the
+  // PKCE verifier and the deep link; the renderer only receives a verified
+  // token hash and exchanges it for a session.
+  useEffect(() => {
+    const bridge = window.streamifyDesktop;
+    if (!bridge?.auth) return;
+    setDesktopAuthAvailable(true);
+
+    const offResult = bridge.auth.onResult((result) => {
+      setIsDesktopAuthPending(false);
+      if (!supabase) {
+        setErrorMessage(authUnavailableMessage);
+        return;
+      }
+      void supabase.auth
+        .verifyOtp({ token_hash: result.token_hash, type: "magiclink" })
+        .then(({ error }) => {
+          if (error) {
+            setErrorMessage(error.message);
+            return;
+          }
+          setMessage(t("auth.signedIn"));
+          router.replace("/settings");
+          router.refresh();
+        });
+    });
+    const offError = bridge.auth.onError((error) => {
+      setIsDesktopAuthPending(false);
+      setErrorMessage(error.message);
+    });
+    return () => {
+      offResult();
+      offError();
+    };
+  }, [router, supabase, t]);
+
+  const startDesktopAuth = () => {
+    const bridge = window.streamifyDesktop;
+    if (!bridge?.auth) {
+      setErrorMessage(authUnavailableMessage);
+      return;
+    }
+    setIsDesktopAuthPending(true);
+    setErrorMessage(null);
+    const result = bridge.auth.start();
+    if (!result?.ok) {
+      setIsDesktopAuthPending(false);
+      setErrorMessage(result?.message ?? authUnavailableMessage);
+    }
+  };
 
   useEffect(() => {
     if (!authError) return;
@@ -516,6 +571,30 @@ export default function AuthScreen({ mode }: AuthScreenProps) {
                     : t("auth.signInDescription")}
                 </p>
 
+                {desktopAuthAvailable ? (
+                  <div className="mt-5 space-y-3.5">
+                    <button
+                      type="button"
+                      disabled={isDesktopAuthPending}
+                      onClick={startDesktopAuth}
+                      className="w-full rounded-xl bg-white px-4 py-3 text-sm font-bold text-black transition hover:scale-[1.01] hover:bg-white/95 disabled:opacity-60"
+                    >
+                      {isDesktopAuthPending
+                        ? t("common.loading")
+                        : isForgotPassword
+                        ? t("auth.desktopResetLink")
+                        : isResetPassword
+                        ? t("auth.desktopResetPassword")
+                        : isSignUp
+                        ? t("auth.desktopSignUp")
+                        : t("auth.desktopSignIn")}
+                    </button>
+                    <p className="text-center text-xs text-white/50">
+                      {t("auth.desktopHint")}
+                    </p>
+                  </div>
+                ) : null}
+                {desktopAuthAvailable ? null : (
                 <form className="mt-5 space-y-3.5" onSubmit={handleSubmit}>
                   <input
                     type="email"
@@ -632,6 +711,7 @@ export default function AuthScreen({ mode }: AuthScreenProps) {
                     </button>
                   ) : null}
                 </form>
+                )}
 
                 <p className="mt-5 text-center text-sm text-white/58">
                   {isForgotPassword || isResetPassword

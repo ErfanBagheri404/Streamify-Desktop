@@ -39,4 +39,20 @@ contextBridge.exposeInMainWorld("streamifyDesktop", {
     onError: (callback) =>
       ipcRenderer.on("desktop:update-error", (_event, info) => callback(info)),
   },
+  // Browser-mediated sign-in. Main owns the PKCE verifier + the deep link, so
+  // no auth secret is ever exposed to the renderer. The renderer only receives
+  // the already-verified token hash and hands it to Supabase.
+  auth: {
+    start: () => ipcRenderer.sendSync("desktop:auth-start"),
+    onResult: (callback) => {
+      const listener = (_event, payload) => callback(payload);
+      ipcRenderer.on("desktop:auth-result", listener);
+      return () => ipcRenderer.removeListener("desktop:auth-result", listener);
+    },
+    onError: (callback) => {
+      const listener = (_event, payload) => callback(payload);
+      ipcRenderer.on("desktop:auth-error", listener);
+      return () => ipcRenderer.removeListener("desktop:auth-error", listener);
+    },
+  },
 });

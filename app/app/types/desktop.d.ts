@@ -52,6 +52,24 @@ export interface UpdateProgressInfo {
   total: number;
 }
 
+export interface AuthStartResult {
+  ok: boolean;
+  /** Opaque per-attempt id, echoes back if the flow completes. */
+  state?: string;
+  message?: string;
+}
+
+export interface AuthResult {
+  /** Supabase token_hash; exchanged for a session with verifyOtp. */
+  token_hash: string;
+  type: "magiclink" | "email" | string;
+  email?: string;
+}
+
+export interface AuthError {
+  message: string;
+}
+
 export interface StreamifyDesktopBridge {
   platform: string;
   isDesktop: true;
@@ -76,6 +94,19 @@ export interface StreamifyDesktopBridge {
     onDownloaded: (callback: (info: { version: string }) => void) => void;
     onNotAvailable: (callback: () => void) => void;
     onError: (callback: (info: { message: string }) => void) => void;
+  };
+  /**
+   * Browser-mediated sign-in. The desktop never takes a password: main opens
+   * the webplayer, the user authorizes there, and main redeems a PKCE-bound
+   * grant before handing the renderer a token hash.
+   */
+  auth?: {
+    /** Open the webplayer confirm page in the OS browser. */
+    start: () => AuthStartResult;
+    /** Fires once when the deep link round-trip succeeded. */
+    onResult: (callback: (result: AuthResult) => void) => () => void;
+    /** Fires when the attempt failed, expired, or was rejected. */
+    onError: (callback: (error: AuthError) => void) => () => void;
   };
 }
 

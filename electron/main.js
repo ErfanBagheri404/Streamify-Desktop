@@ -53,15 +53,18 @@ let isQuitting = false;
 let isBooting = true;
 
 // ---- single instance -------------------------------------------------------
+// The streamify-desktop://auth?grant&state deep link can only arrive on the
+// second process (single-instance lock), so the second-instance handler also
+// routes deep-link URLs back into this instance. argv parsing covers both
+// packaged (argv[1]) and dev (`electron . <url>`, argv[last]) launches.
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  app.on("second-instance", () => {
-    if (!mainWindow) return;
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
+  app.on("second-instance", (_event, argv) => {
+    const deepLink = Array.isArray(argv) ? argv.find((arg) => typeof arg === "string" && arg.startsWith(`${AUTH_SCHEME}://`)) : null;
+    if (deepLink) handleDeepLink(deepLink);
+    showWindow();
   });
 }
 
@@ -146,6 +149,167 @@ function persistBounds() {
     fs.mkdirSync(app.getPath("userData"), { recursive: true });
     fs.writeFileSync(boundsFile(), JSON.stringify(mainWindow.getNormalBounds()));
   } catch {}
+}
+
+// ---- desktop auth handoff (browser-mediated device grant) ------------------
+// The desktop never collects credentials. beginDesktopAuth() creates a PKCE
+// challenge + nonce, opens the webplayer confirm page in the OS browser, and
+// the webplayer hands a short-lived signed grant back via
+// streamify-desktop://auth?grant&state. The verifier never leaves this
+// process until the redeem call below; no token ever appears in a URL.
+const AUTH_SCHEME = "streamify-desktop";
+const WEBPLAYER_ORIGIN = (process.env.STREAMIFY_WEBPLAYER_URL || "https://streamify-player.vercel.app").replace(/\/+$/, "");
+const AUTH_PENDING_TTL_MS = 5 * 60 * 1000;
+// state -> { verifier, nonce, expiresAt }
+const authPending = new Map();
+
+function base64url(buffer) {
+  return buffer.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function pruneAuthPending() {
+  const now = Date.now();
+  for (const [state, entry] of authPending) {
+    if (entry.expiresAt <= now) authPending.delete(state);
+  }
+}
+
+// constant-time compare so a local observer can't learn the nonce bytewise.
+function safeEqual(a, b) {
+  const bufA = Buffer.from(String(a));
+  const bufB = Buffer.from(String(b));
+  if (bufA.length !== bufB.length) return false;
+  let diff = 0;
+  for (let i = 0; i < bufA.length; i++) diff |= bufA[i] ^ bufB[i];
+  return diff === 0;
+}
+
+// Hardened deep-link parse: validate scheme, require grant+state, reject
+// anything malformed (unknown host, extra params still fine — ignore them).
+function parseDeepLink(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(String(rawUrl));
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== `${AUTH_SCHEME}:`) return null;
+  if (parsed.host !== "auth") return null;
+  const grant = parsed.searchParams.get("grant");
+  const state = parsed.searchParams.get("state");
+  if (!grant || !state) return null;
+  return { grant, state };
+}
+
+function emitAuthError(message) {
+  send("desktop:auth-error", { message });
+  showWindow();
+}
+
+async function redeemGrant(grant, entry) {
+  let response;
+  try {
+    response = await fetch(`${WEBPLAYER_ORIGIN}/api/auth/device/token`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant, verifier: entry.verifier }),
+    });
+  } catch (error) {
+    emitAuthError(`Could not reach the sign-in service: ${error && error.message ? error.message : error}`);
+    return;
+  }
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch {}
+  if (!response.ok || !payload || typeof payload.token_hash !== "string") {
+    emitAuthError(
+      (payload && typeof payload.error === "string" && payload.error) ||
+        `Sign-in failed (status ${response.status}).`
+    );
+    return;
+  }
+  // Bind the response to this app instance: the nonce echoed through the
+  // browser must match what we generated, compared constant-time.
+  const nonce = typeof payload.nonce === "string" ? payload.nonce : "";
+  if (!nonce || !safeEqual(nonce, entry.nonce)) {
+    emitAuthError("Sign-in response did not match this device. Please try again.");
+    return;
+  }
+  send("desktop:auth-result", {
+    token_hash: payload.token_hash,
+    type: typeof payload.type === "string" ? payload.type : "magiclink",
+    email: typeof payload.email === "string" ? payload.email : undefined,
+  });
+  showWindow();
+}
+
+function handleDeepLink(rawUrl) {
+  const parsed = parseDeepLink(rawUrl);
+  if (!parsed) {
+    bootLog(`[auth] ignoring malformed deep link: ${String(rawUrl).slice(0, 80)}`);
+    return;
+  }
+  pruneAuthPending();
+  const entry = authPending.get(parsed.state);
+  if (!entry) {
+    emitAuthError("This sign-in link expired or belongs to another session. Please try again.");
+    return;
+  }
+  authPending.delete(parsed.state);
+  if (entry.expiresAt <= Date.now()) {
+    emitAuthError("This sign-in attempt expired. Please try again.");
+    return;
+  }
+  void redeemGrant(parsed.grant, entry);
+}
+
+function beginDesktopAuth() {
+  const crypto = require("crypto");
+  pruneAuthPending();
+  const verifier = base64url(crypto.randomBytes(32));
+  const challenge = base64url(crypto.createHash("sha256").update(verifier).digest());
+  const nonce = base64url(crypto.randomBytes(16));
+  const state = base64url(crypto.randomBytes(16));
+  authPending.set(state, { verifier, nonce, expiresAt: Date.now() + AUTH_PENDING_TTL_MS });
+  // Cap the pending map so abandoned attempts can't grow it unboundedly.
+  if (authPending.size > 20) {
+    const oldest = authPending.keys().next();
+    if (!oldest.done) authPending.delete(oldest.value);
+  }
+  const url = new URL("/auth/desktop", WEBPLAYER_ORIGIN);
+  url.searchParams.set("challenge", challenge);
+  url.searchParams.set("state", state);
+  url.searchParams.set("nonce", nonce);
+  void shell.openExternal(url.toString());
+  return { state };
+}
+
+ipcMain.on("desktop:auth-start", (event) => {
+  try {
+    event.returnValue = { ok: true, ...beginDesktopAuth() };
+  } catch (error) {
+    event.returnValue = { ok: false, message: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+// macOS delivers custom-protocol URLs here. Windows/Linux deliver them via
+// second-instance argv (handled above). First-launch cold start on any OS can
+// also carry the URL in process.argv, handled in boot().
+if (process.platform === "darwin") {
+  app.on("open-url", (event, url) => {
+    event.preventDefault();
+    handleDeepLink(url);
+  });
+}
+
+function registerAuthProtocol() {
+  // Dev: `electron .` needs the explicit exe path + args so the OS can route
+  // the URL back into this process. Packaged: plain registration is enough.
+  const ok = isDev
+    ? app.setAsDefaultProtocolClient(AUTH_SCHEME, process.execPath, [path.resolve(process.argv[1] || ".")])
+    : app.setAsDefaultProtocolClient(AUTH_SCHEME);
+  bootLog(`[auth] protocol ${AUTH_SCHEME}:// registered=${ok}`);
 }
 
 // ---- in-process API --------------------------------------------------------
@@ -282,6 +446,17 @@ function createWindow() {
   mainWindow.webContents.on("did-finish-load", () => {
     if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
       mainWindow.show();
+    }
+    // Cold start: a streamify-desktop:// URL may sit in process.argv (Windows
+    // and Linux launch the app with the link when nothing is running). The
+    // pending map only exists in this process, so honouring it on first load is
+    // what makes the handoff work when the app was closed.
+    const coldStartLink = process.argv.find(
+      (arg) => typeof arg === "string" && arg.startsWith(`${AUTH_SCHEME}://`)
+    );
+    if (coldStartLink) {
+      process.argv.splice(process.argv.indexOf(coldStartLink), 1);
+      handleDeepLink(coldStartLink);
     }
   });
 
@@ -562,6 +737,7 @@ async function boot() {
   await app.whenReady();
   bootLog(`[boot] app-ready dev=${isDev} apiPort=${API_PORT} appPort=${APP_PORT}`);
   nativeTheme.themeSource = "dark";
+  registerAuthProtocol();
   buildMenu();
   createTray();
   integration.wireMpris();
