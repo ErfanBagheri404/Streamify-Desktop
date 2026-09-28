@@ -1143,6 +1143,35 @@ async function fetchVideoDetails(
             signal
           ),
       })),
+      // Last resort: yt-dlp talks to YouTube directly, so it survives every
+      // public invidious/piped instance going down at once. Desktop-only and
+      // lazy — a Cloudflare Worker has no child_process, and it must never be
+      // imported eagerly.
+      {
+        run: async () => {
+          const { resolveYouTubeWithYtDlp } = await import("./ytdlp");
+          const result = await resolveYouTubeWithYtDlp(
+            config,
+            videoId,
+            source || "youtube"
+          );
+          const audioUrl = buildPlayableAudioUrl(request, result.streamUrl, "");
+          if (!audioUrl) {
+            throw new Error("yt-dlp stream could not be relayed");
+          }
+          return {
+            id: result.id,
+            title: result.title,
+            author: result.author,
+            thumbnailUrl: result.thumbnailUrl,
+            lengthSeconds: result.lengthSeconds,
+            adaptiveFormats: [],
+            audioUrl,
+            providerHint: "ytdlp",
+            source: result.source,
+          };
+        },
+      },
     ];
 
     const errors: string[] = [];

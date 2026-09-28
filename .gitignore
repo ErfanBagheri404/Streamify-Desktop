@@ -11,3 +11,6 @@ release.old/
 # Template is committed; real file is gitignored (copied by CI from secret)
 !app/.env.local.template
 *.tsbuildinfo
+# yt-dlp binaries are fetched at build time by scripts/fetch-ytdlp.mjs
+# (CI downloads the right one per OS); never commit the 17-40MB blobs.
+resources/bin/

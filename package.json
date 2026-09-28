@@ -69,6 +69,13 @@
       {
         "from": "app/.env.local",
         "to": "app/.env.local"
+      },
+      {
+        "from": "resources/bin",
+        "to": "bin",
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "win": {

@@ -54,6 +54,8 @@ jobs:
 
       - run: npm run build:api
       - run: npm run build:app
+      - name: Fetch yt-dlp binary (fallback resolver)
+        run: node scripts/fetch-ytdlp.mjs
       - run: node scripts/make-icon.mjs
 
       # Plain build on PRs / manual runs — artifacts attached to the workflow run.
