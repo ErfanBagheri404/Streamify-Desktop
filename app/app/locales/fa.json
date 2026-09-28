@@ -518,5 +518,12 @@
   "update.errorTitle": "به‌روزرسانی ناموفق بود",
   "update.errorDescription": "به‌روزرسانی خودکار ممکن نشد. می‌توانید نسخه جدید را از صفحه رلیزها دانلود کنید.",
   "update.openReleases": "باز کردن صفحه رلیزها",
-  "update.checkAction": "بررسی به‌روزرسانی"
+  "update.checkAction": "بررسی به‌روزرسانی",
+  "settings.desktop": "دسکتاپ",
+  "settings.systemIntegration": "یکپارچه سازی سیستم",
+  "settings.systemIntegrationDescription": "رفتار استریمیفای به عنوان یک برنامه دسکتاپ بومی: اعلان های سیستمی، ادامه پخش و کنترل های رسانه سیستم عامل.",
+  "settings.desktopNotifications": "اعلان آهنگ در حال پخش",
+  "settings.desktopNotificationsDescription": "با تغییر آهنگ، اعلان سیستمی با نام آهنگ، خواننده و کاور نمایش بده.",
+  "settings.resumeLastTrack": "ادامه از آخرین نقطه",
+  "settings.resumeLastTrackDescription": "هنگام اجرا، آخرین آهنگ و موقعیت را باز کن، مثل اسپاتیفای."
 }

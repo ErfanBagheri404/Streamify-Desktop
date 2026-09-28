@@ -788,6 +788,44 @@ export default function SettingsPage() {
               />
             </Section>
 
+            {typeof window !== "undefined" &&
+              Boolean(window.streamifyDesktop?.isDesktop) && (
+                <Section
+                  eyebrow={t("settings.desktop")}
+                  title={t("settings.systemIntegration")}
+                  description={t("settings.systemIntegrationDescription")}
+                >
+              <SettingRow
+                label={t("settings.desktopNotifications")}
+                description={t("settings.desktopNotificationsDescription")}
+                control={
+                  <Toggle
+                    enabled={settings.desktopNotifications}
+                    onClick={() =>
+                      updateSettings({
+                        desktopNotifications: !settings.desktopNotifications,
+                      })
+                    }
+                  />
+                }
+              />
+              <SettingRow
+                label={t("settings.resumeLastTrack")}
+                description={t("settings.resumeLastTrackDescription")}
+                control={
+                  <Toggle
+                    enabled={settings.resumeLastTrack}
+                    onClick={() =>
+                      updateSettings({
+                        resumeLastTrack: !settings.resumeLastTrack,
+                      })
+                    }
+                  />
+                }
+              />
+                </Section>
+              )}
+
             <Section
               eyebrow={t("settings.discovery")}
               title={t("settings.searchPreferences")}

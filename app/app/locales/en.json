@@ -520,5 +520,12 @@
   "update.errorTitle": "Update failed",
   "update.errorDescription": "Could not update automatically. You can download the new version from the releases page.",
   "update.openReleases": "Open releases page",
-  "update.checkAction": "Check for updates"
+  "update.checkAction": "Check for updates",
+  "settings.desktop": "Desktop",
+  "settings.systemIntegration": "System Integration",
+  "settings.systemIntegrationDescription": "How Streamify behaves as a native desktop app: system notifications, resume, and OS media controls.",
+  "settings.desktopNotifications": "Now Playing Notifications",
+  "settings.desktopNotificationsDescription": "Show a system notification with track, artist, and cover art whenever the song changes.",
+  "settings.resumeLastTrack": "Resume Where You Left Off",
+  "settings.resumeLastTrackDescription": "Reopen the last track and position on startup, like Spotify does."
 }

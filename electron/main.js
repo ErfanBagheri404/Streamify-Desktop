@@ -84,8 +84,24 @@ function waitForHttp(url, timeoutMs = 180000) {
   });
 }
 
+// The logo is an SVG, which nativeImage cannot decode — the tray and the
+// window icon need a raster. dev/ uses the SVG (Chromium renders it for
+// BrowserWindow), packaged builds get the 512px PNG electron-builder generated.
 function iconPath() {
+  if (app.isPackaged) {
+    const png = path.join(ROOT, "icon.png");
+    if (fs.existsSync(png)) return png;
+  }
   return path.join(ROOT, "app", "public", "StreamifyLogo.svg");
+}
+
+// The tray glyph is transparent, so it sits on the OS chrome — that's the one
+// icon that must be an alpha PNG, not the opaque installer tile.
+function trayIcon() {
+  const transparent = path.join(ROOT, "build", "icon-tray.png");
+  const source = fs.existsSync(transparent) ? transparent : iconPath();
+  const image = nativeImage.createFromPath(source);
+  return image.isEmpty() ? nativeImage.createEmpty() : image.resize({ width: 16, height: 16, quality: "best" });
 }
 
 // Windows GUI-subsystem Electron binaries lose stdout when spawned detached, so
@@ -281,6 +297,40 @@ function createWindow() {
   return mainWindow;
 }
 
+// ---- desktop OS integration (Now Playing notification + Linux MPRIS) -------
+// The renderer owns playback; it pushes state here and the OS surfaces it.
+// Commands coming back (tray, menu, media keys, MPRIS) are forwarded to the
+// renderer over the same channel.
+const integration = require("./integration");
+integration.setIntegrationHooks({ showWindow, sendCommand, bootLog });
+
+// The renderer reports the track it just started (or stopped) so the OS can
+// show a Now Playing notification and update the MPRIS metadata.
+ipcMain.on(
+  "desktop:now-playing",
+  (_event, payload) => {
+    const song = payload?.song || null;
+    const state = {
+      isPlaying: !!payload?.isPlaying,
+      hasNext: !!payload?.hasNext,
+      hasPrevious: !!payload?.hasPrevious,
+      position: Number(payload?.position) || 0,
+    };
+    if (song && payload?.notify !== false) {
+      void integration.showNowPlaying(song, state);
+    } else if (!song) {
+      integration.clearNowPlaying();
+    }
+    integration.publishMpris(song, state);
+  }
+);
+
+// Position updates are high-frequency; MPRIS only needs the latest one, and
+// the notification never cares, so this is fire-and-forget.
+ipcMain.on("desktop:position", (_event, seconds) => {
+  integration.publishMprisPosition(Number(seconds) || 0);
+});
+
 // ---- menu + media keys + tray ---------------------------------------------
 function send(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -288,8 +338,12 @@ function send(channel, payload) {
   }
 }
 
-function sendCommand(command) {
-  send("desktop:command", command);
+function sendCommand(command, payload) {
+  const normalized = {
+    command: typeof command === "string" ? command : command?.command,
+    payload: payload ?? (typeof command === "object" ? command?.payload : undefined),
+  };
+  send("desktop:command", normalized);
 }
 
 function buildMenu() {
@@ -329,6 +383,10 @@ function buildMenu() {
           label: "About Streamify Desktop",
           click: () => void shell.openExternal("https://github.com/ErfanBagheri404/Streamify-Desktop"),
         },
+        {
+          label: "Check for updates",
+          click: () => triggerUpdateCheck("menu"),
+        },
       ],
     },
   ];
@@ -353,6 +411,15 @@ function showWindow() {
 // downloads the new exe, everything else (dmg/zip/deb/AppImage) notifies and
 // links the release page.
 let updateDownloadedVersion = null;
+// Held at module scope so the app menu and the tray can trigger a check
+// without going through a renderer round trip.
+let updaterRef = null;
+
+function triggerUpdateCheck(source = "menu") {
+  if (!canSelfUpdate || !updaterRef) return;
+  bootLog(`[update] check requested from ${source}`);
+  void updaterRef.checkForUpdates();
+}
 
 function forwardUpdate(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -365,6 +432,7 @@ function wireSelfUpdate() {
   let updater;
   try {
     ({ autoUpdater: updater } = require("electron-updater"));
+    updaterRef = updater;
   } catch (error) {
     bootLog(`[update] electron-updater unavailable: ${error && error.message}`);
     return;
@@ -400,11 +468,7 @@ function wireSelfUpdate() {
     forwardUpdate("desktop:update-error", { message: (error && error.message) || "update failed" });
   });
 
-  ipcMain.on("desktop:update-check", () => {
-    if (!canSelfUpdate) return;
-    bootLog("[update] manual check");
-    void updater.checkForUpdates();
-  });
+  ipcMain.on("desktop:update-check", () => triggerUpdateCheck("renderer"));
   ipcMain.on("desktop:update-download", () => {
     if (!canSelfUpdate) return;
     bootLog("[update] user started download");
@@ -443,17 +507,20 @@ function releaseNotesText(info) {
 // Closing the window hides it instead of quitting (playback survives), so the
 // tray is the only way back for users who don't know the shortcut.
 function createTray() {
-  const icon = nativeImage.createFromPath(iconPath());
-  tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon.resize({ width: 16, height: 16 }));
+  tray = new Tray(trayIcon());
   tray.setToolTip("Streamify Desktop");
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: "Show Streamify", click: () => showWindow() },
       { type: "separator" },
-      { label: "Play / Pause", click: () => sendCommand("play-pause") },
-      { label: "Next", click: () => sendCommand("next") },
-      { label: "Previous", click: () => sendCommand("previous") },
+      { label: "Next track", click: () => sendCommand("next") },
+      { label: "Previous track", click: () => sendCommand("previous") },
+      { label: "Play / pause", click: () => sendCommand("play-pause") },
       { type: "separator" },
+      {
+        label: "Check for updates",
+        click: () => triggerUpdateCheck("tray"),
+      },
       {
         label: "Quit",
         click: () => {
@@ -492,6 +559,7 @@ async function boot() {
   nativeTheme.themeSource = "dark";
   buildMenu();
   createTray();
+  integration.wireMpris();
 
   for (const [key, action] of [
     ["MediaPlayPause", "play-pause"],

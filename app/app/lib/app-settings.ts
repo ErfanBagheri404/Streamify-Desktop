@@ -59,6 +59,9 @@ export interface AppSettings {
   preferredSearchSource: PreferredSearchSource;
   seekStepSeconds: number;
   showCommunityBanner: boolean;
+  // Desktop shell only (Electron). Web builds ignore these.
+  desktopNotifications: boolean;
+  resumeLastTrack: boolean;
 }
 
 export const APP_SETTINGS_STORAGE_KEY = "streamifyAppSettings";
@@ -94,6 +97,8 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   preferredSearchSource: "mixed",
   seekStepSeconds: 10,
   showCommunityBanner: true,
+  desktopNotifications: true,
+  resumeLastTrack: true,
 };
 
 function isAppLanguage(value: unknown): value is AppLanguage {
@@ -215,5 +220,13 @@ export function sanitizeAppSettings(value: unknown): AppSettings {
       typeof record.showCommunityBanner === "boolean"
         ? record.showCommunityBanner
         : DEFAULT_APP_SETTINGS.showCommunityBanner,
+    desktopNotifications:
+      typeof record.desktopNotifications === "boolean"
+        ? record.desktopNotifications
+        : DEFAULT_APP_SETTINGS.desktopNotifications,
+    resumeLastTrack:
+      typeof record.resumeLastTrack === "boolean"
+        ? record.resumeLastTrack
+        : DEFAULT_APP_SETTINGS.resumeLastTrack,
   };
 }

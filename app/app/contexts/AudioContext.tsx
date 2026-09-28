@@ -1450,6 +1450,24 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
           );
           setRepeatMode(nextRepeatMode);
           setIsPlaying(Boolean(state.isPlaying));
+          // Resume the saved position once the audio element actually has
+          // metadata — seeking before that silently no-ops, which is why the
+          // saved time never used to be restored.
+          if (state.resumeSeconds && state.resumeSeconds > 0) {
+            const resumeAt = state.resumeSeconds;
+            const audio = audioRef.current;
+            const applyResume = () => {
+              audio.currentTime = resumeAt;
+              setCurrentTime(resumeAt);
+            };
+            if (!audio) {
+              // no element yet — nothing to seek; skip silently
+            } else if (audio.readyState >= 1) {
+              applyResume();
+            } else {
+              audio.addEventListener("loadedmetadata", applyResume, { once: true });
+            }
+          }
         }
       } catch (error) {
         console.error("Error loading audio player state:", error);
@@ -1484,6 +1502,8 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
       isRepeat,
       isPlaying,
       isSongLoading: false,
+      // Desktop "resume where you left off" reads this back on mount.
+      resumeSeconds: currentTime,
     };
     localStorage.setItem("audioPlayerState", JSON.stringify(state));
     lastPersistedSongIdRef.current = currentSong?.id || null;
@@ -4188,14 +4208,24 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
     volume,
   ]);
 
-  // Desktop shell (Electron) commands: main-process menu items and the OS media
-  // keys arrive here. Space and the arrow keys already work because the window
-  // keeps DOM focus, but media keys and menu items only exist outside the page.
+  // Desktop shell (Electron) commands: main-process menu items, tray, OS
+  // media keys and MPRIS all arrive here as { command, payload }.
+  // Space and the arrow keys already work because the window keeps DOM
+  // focus, but media keys and menu items only exist outside the page.
   useEffect(() => {
     const bridge = window.streamifyDesktop;
     if (!bridge?.onCommand) return;
 
-    return bridge.onCommand((command) => {
+    return bridge.onCommand(({ command, payload }) => {
+      // MPRIS issues distinct play/pause verbs; everything else toggles.
+      if (command === "play") {
+        if (currentSong && !isPlaying) resumeSong();
+        return;
+      }
+      if (command === "pause") {
+        if (currentSong && isPlaying) pauseSong();
+        return;
+      }
       if (command === "play-pause") {
         if (!currentSong) return;
         if (isPlaying) pauseSong();
@@ -4208,6 +4238,11 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
       }
       if (command === "previous") {
         playPrevious();
+        return;
+      }
+      // MPRIS `seek` / `position` arrive as seconds in payload.
+      if (command === "seek" && Number.isFinite(payload)) {
+        seekTo(payload);
       }
     });
   }, [
@@ -4217,6 +4252,44 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
     playNext,
     playPrevious,
     resumeSong,
+    seekTo,
+  ]);
+
+  // Push the current track and playback state to the main process so the OS
+  // surfaces it: the Now Playing notification and Linux MPRIS metadata both
+  // come from this one report. Only the track + play state change the UI
+  // surfaces, so this fires on track and pause/resume changes, not per tick.
+  useEffect(() => {
+    const bridge = window.streamifyDesktop;
+    if (!bridge?.reportNowPlaying) return;
+
+    const song = currentSong
+      ? {
+          id: currentSong.id,
+          title: currentSong.title || "Unknown Track",
+          artist: currentSong.artist || "Unknown Artist",
+          duration: currentSong.duration || 0,
+          coverUrl: currentSong.coverUrl,
+        }
+      : null;
+
+    bridge.reportNowPlaying({
+      song,
+      isPlaying,
+      hasNext: queueIndex >= 0 && queueIndex < playbackQueue.length - 1,
+      hasPrevious: queueIndex > 0,
+      position: audioRef.current?.currentTime || 0,
+      // The notification is the only visible interruption, so it alone is
+      // opt-out. MPRIS metadata keeps flowing either way — the desktop sound
+      // menu needs it and it is silent.
+      notify: settings.desktopNotifications,
+    });
+  }, [
+    currentSong,
+    isPlaying,
+    playbackQueue,
+    queueIndex,
+    settings.desktopNotifications,
   ]);
 
   useEffect(() => {
@@ -4410,6 +4483,10 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
         playbackRate: 1,
         position: safePosition,
       });
+      // Same tick feeds the Linux MPRIS service, so the DE's progress bar
+      // moves too. Reuses this effect's existing throttle instead of adding
+      // a second timer for the same data.
+      window.streamifyDesktop?.reportPosition?.(safePosition);
       lastMediaSessionPositionRef.current = safePosition;
       lastMediaSessionPositionUpdateRef.current = now;
     } catch (error) {

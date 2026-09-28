@@ -14,8 +14,15 @@ contextBridge.exposeInMainWorld("streamifyDesktop", {
   version: ipcRenderer.sendSync("desktop:app-info").version,
   setTheme: (theme) => ipcRenderer.send("desktop:theme", theme),
   onCommand: (callback) => {
-    ipcRenderer.on("desktop:command", (_event, command) => callback(command));
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("desktop:command", listener);
+    return () => ipcRenderer.removeListener("desktop:command", listener);
   },
+  // Push current track + playback state to the main process (Now Playing
+  // notification + Linux MPRIS). High-frequency position goes over its own
+  // fire-and-forget channel.
+  reportNowPlaying: (payload) => ipcRenderer.send("desktop:now-playing", payload),
+  reportPosition: (seconds) => ipcRenderer.send("desktop:position", seconds),
   // Self-update flow: main owns electron-updater, renderer owns the modal.
   update: {
     check: () => ipcRenderer.send("desktop:update-check"),

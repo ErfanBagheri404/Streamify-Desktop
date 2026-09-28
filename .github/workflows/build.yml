@@ -70,6 +70,25 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Blockmaps only feed differential downloads, which the build disables.
+      # latest*.yml STAYS: electron-updater's GitHubProvider throws
+      # CHANNEL_FILE_NOT_FOUND without it, so removing it would silently kill
+      # the in-app update flow.
+      - name: Drop blockmap assets from the release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version=$(node -e "console.log(require('./package.json').version)")
+          tag="v$version"
+          gh release view "$tag" --json assets -q '.assets[].name' \
+            | grep '\.blockmap$' \
+            | while read -r asset; do
+                echo "removing $asset"
+                gh release delete-asset "$tag" "$asset" --yes
+              done || true
+
       - uses: actions/upload-artifact@v4
         if: github.event_name != 'push' || github.ref != 'refs/heads/main'
         with:
