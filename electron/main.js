@@ -84,13 +84,18 @@ function waitForHttp(url, timeoutMs = 180000) {
   });
 }
 
-// The logo is an SVG, which nativeImage cannot decode — the tray and the
-// window icon need a raster. dev/ uses the SVG (Chromium renders it for
-// BrowserWindow), packaged builds get the 512px PNG electron-builder generated.
+// The logo is an SVG, which nativeImage cannot decode. BrowserWindow's `icon`
+// and the tray both need a real raster, so dev uses the rendered build/icon.png
+// (present in the repo) and packaged builds use the same file from resources.
 function iconPath() {
-  if (app.isPackaged) {
-    const png = path.join(ROOT, "icon.png");
-    if (fs.existsSync(png)) return png;
+  const candidates = app.isPackaged
+    ? [path.join(ROOT, "icon.png")]
+    : [
+        path.join(__dirname, "..", "build", "icon.png"),
+        path.join(ROOT, "icon.png"),
+      ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
   }
   return path.join(ROOT, "app", "public", "StreamifyLogo.svg");
 }
