@@ -164,8 +164,8 @@ export default function ArtistPage() {
     error: string | null;
   }>({
     cacheKey: artistCacheKey,
-    data: cachedArtistData,
-    isLoading: !cachedArtistData,
+    data: null,
+    isLoading: true,
     error: null,
   });
   const [loadingSongId, setLoadingSongId] = useState<string | null>(null);
@@ -174,8 +174,8 @@ export default function ArtistPage() {
       ? artistState
       : {
           cacheKey: artistCacheKey,
-          data: cachedArtistData,
-          isLoading: !cachedArtistData,
+          data: null,
+          isLoading: true,
           error: null,
         };
   const data = activeState.data;
@@ -202,6 +202,9 @@ export default function ArtistPage() {
       }
 
       try {
+        // Hydration-safe cache read: this effect runs after first render,
+        // so the SSR HTML (loading skeleton) and the client first render
+        // agree — no React #418 text mismatch.
         const nextParams = new URLSearchParams({ id });
         if (sourceParam) nextParams.set("source", sourceParam);
         const res = await fetchBackendRoute("/artist", {

@@ -561,10 +561,13 @@ export default function CollectionPage() {
     error: string | null;
     isLoading: boolean;
   }>({
-    collection: cachedRemoteCollection?.collection || null,
-    entries: cachedRemoteCollection?.entries || [],
+    // Hydration-safe: never seed from storage during first render (client
+    // would show cached content while SSR HTML shows the skeleton → React
+    // #418). The effect below applies the cache right after hydration.
+    collection: null,
+    entries: [],
     error: null,
-    isLoading: !cachedRemoteCollection,
+    isLoading: true,
   });
   const [loadingSongId, setLoadingSongId] = useState<string | null>(null);
   const [isHydrating, setIsHydrating] = useState(false);

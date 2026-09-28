@@ -124,6 +124,10 @@ async function showNowPlaying(song, state) {
   const key = `${song.id}:${state.isPlaying}`;
   if (key === lastNotifiedKey) return;
   lastNotifiedKey = key;
+  bootLog(
+    `[now-playing] ${state.isPlaying ? "playing" : "paused"} — ${song.title}` +
+      (song.artist ? ` — ${song.artist}` : "")
+  );
 
   const artwork = await resolveArtwork(song);
   const icon = artwork ? nativeImage.createFromDataURL(artwork.dataUrl) : undefined;
