@@ -45,17 +45,17 @@ const html =
 
 const svgPath = path.join(root, "app", "public", "StreamifyLogo.svg");
 
-// [output file, background]. null = transparent (tray), colour = installer tile.
+// [output file, background]. null = transparent.
 const TRAY_VARIANTS = [
-  [outFile, "#111318"],
+  [outFile, null],
   [trayFile, null],
 ];
 
-// Two variants come out of one render pass:
-//   icon.png        — opaque dark tile for the installers (NSIS/dmg/deb/shortcut)
-//   icon-tray.png   — transparent background, glyph only, for the tray icon
-// A tray icon is drawn over the desktop, so any baked-in background shows up
-// as a coloured square around the glyph.
+// Both variants are transparent:
+//   icon.png        — app/window/installer icon, glyph only (tray proved this renders)
+//   icon-tray.png   — same glyph for the tray (kept separate in case sizes diverge)
+// A baked-in background shows up as a coloured square in the taskbar,
+// so neither file gets one.
 const helper = `
 const { app, BrowserWindow } = require("electron");
 const fs = require("fs");
