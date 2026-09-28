@@ -3,7 +3,7 @@ import {
   pickAudioFormatUrl,
   pickThumbnailUrl,
 } from "../src/routes/ytdlp-pick";
-import { parseYtDlpJson, toYtDlpResult } from "../src/routes/ytdlp";
+import { parseYtDlpJson, toYtDlpResult, findYtDlpBinary } from "../src/routes/ytdlp";
 
 describe("pickAudioFormatUrl", () => {
   it("prefers m4a over opus/webm", () => {
@@ -67,6 +67,42 @@ describe("pickThumbnailUrl", () => {
 
   it("returns empty string when nothing is available", () => {
     expect(pickThumbnailUrl({})).toBe("");
+  });
+});
+
+describe("findYtDlpBinary", () => {
+  const realResources = (process as any).resourcesPath;
+  const realEnv = process.env.STREAMIFY_YTDLP_PATH;
+  const restore = () => {
+    if (realResources === undefined) delete (process as any).resourcesPath;
+    else (process as any).resourcesPath = realResources;
+    if (realEnv === undefined) delete process.env.STREAMIFY_YTDLP_PATH;
+    else process.env.STREAMIFY_YTDLP_PATH = realEnv;
+  };
+
+  it("prefers an explicit override", () => {
+    process.env.STREAMIFY_YTDLP_PATH = "/custom/yt-dlp";
+    (process as any).resourcesPath = "/app/resources";
+    expect(findYtDlpBinary()).toBe("/custom/yt-dlp");
+    restore();
+  });
+
+  it("resolves the packaged location under resourcesPath", () => {
+    delete process.env.STREAMIFY_YTDLP_PATH;
+    (process as any).resourcesPath = "/app/resources";
+    const found = findYtDlpBinary();
+    expect(found).toContain("/app/resources");
+    expect(found).toContain("bin");
+    expect(found.endsWith(".exe")).toBe(process.platform === "win32");
+    restore();
+  });
+
+  it("falls back to the repo resources dir when not packaged", () => {
+    delete process.env.STREAMIFY_YTDLP_PATH;
+    delete (process as any).resourcesPath;
+    const found = findYtDlpBinary();
+    expect(found).toContain(`resources${"/"}bin`);
+    restore();
   });
 });
 
