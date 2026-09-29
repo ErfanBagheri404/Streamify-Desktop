@@ -38,6 +38,7 @@
       "electron/**/*",
       "dist/**/*",
       "splash.html",
+      "build/icon.png",
       "build/icon-tray.png",
       "package.json"
     ],

@@ -88,28 +88,36 @@ function waitForHttp(url, timeoutMs = 180000) {
 }
 
 // The logo is an SVG, which nativeImage cannot decode. BrowserWindow's `icon`
-// and the tray both need a real raster, so dev uses the rendered build/icon.png
-// (present in the repo) and packaged builds use the same file from resources.
+// and the tray both need a real raster, so both use the rendered PNGs in
+// build/. Resolve through __dirname, not ROOT: in a packaged build the files
+// live inside app.asar/... while ROOT points at process.resourcesPath, so a
+// ROOT-relative lookup silently misses and falls through to the SVG (which
+// nativeImage rejects -> empty icon).
 function iconPath() {
-  const candidates = app.isPackaged
-    ? [path.join(ROOT, "icon.png")]
-    : [
-        path.join(__dirname, "..", "build", "icon.png"),
-        path.join(ROOT, "icon.png"),
-      ];
+  const candidates = [
+    path.join(__dirname, "..", "build", "icon.png"),
+    path.join(ROOT, "build", "icon.png"),
+  ];
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) return candidate;
   }
-  return path.join(ROOT, "app", "public", "StreamifyLogo.svg");
+  return path.join(__dirname, "..", "app", "public", "StreamifyLogo.svg");
 }
 
 // The tray glyph is transparent, so it sits on the OS chrome — that's the one
 // icon that must be an alpha PNG, not the opaque installer tile.
 function trayIcon() {
-  const transparent = path.join(ROOT, "build", "icon-tray.png");
-  const source = fs.existsSync(transparent) ? transparent : iconPath();
+  const candidates = [
+    path.join(__dirname, "..", "build", "icon-tray.png"),
+    path.join(ROOT, "build", "icon-tray.png"),
+  ];
+  const source = candidates.find((c) => fs.existsSync(c)) || iconPath();
   const image = nativeImage.createFromPath(source);
-  return image.isEmpty() ? nativeImage.createEmpty() : image.resize({ width: 16, height: 16, quality: "best" });
+  if (image.isEmpty()) {
+    bootLog(`[tray] icon failed to load: ${source}`);
+    return nativeImage.createEmpty();
+  }
+  return image.resize({ width: 16, height: 16, quality: "best" });
 }
 
 // Windows GUI-subsystem Electron binaries lose stdout when spawned detached, so
@@ -704,7 +712,11 @@ function releaseNotesText(info) {
 // Closing the window hides it instead of quitting (playback survives), so the
 // tray is the only way back for users who don't know the shortcut.
 function createTray() {
-  tray = new Tray(trayIcon());
+  const icon = trayIcon();
+  // Empty means nativeImage rejected the file (e.g. an SVG slipped through) —
+  // the tray would silently render nothing, so make it loud in the boot log.
+  bootLog(`[tray] icon ok — ${!icon.isEmpty()} from ${icon.getSize().width}x${icon.getSize().height}`);
+  tray = new Tray(icon);
   tray.setToolTip("Streamify Desktop");
   tray.setContextMenu(
     Menu.buildFromTemplate([
