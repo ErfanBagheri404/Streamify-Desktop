@@ -18,3 +18,6 @@ resources/bin/
 .hermes/
 # Scratch screenshots from UI probes
 shot.png
+# Throwaway Win32 UI probes for driving the NSIS installer wizard
+scripts/*-installer*.ps1
+scripts/list-installer-windows.ps1
