@@ -4,7 +4,10 @@
   "private": true,
   "description": "Streamify Desktop - native music player for Windows, macOS and Linux",
   "main": "electron/main.js",
-  "author": "Streamify",
+  "author": {
+    "name": "Streamify",
+    "email": "mrenmityerf@gmail.com"
+  },
   "license": "UNLICENSED",
   "scripts": {
     "dev": "cross-env NODE_ENV=development concurrently -k -n api,next,electron \"node scripts/dev-api.mjs\" \"npm run dev --prefix app\" \"wait-on tcp:7861 tcp:3000 && electron .\"",
