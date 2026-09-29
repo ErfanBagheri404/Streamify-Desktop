@@ -423,21 +423,25 @@ function startNext() {
 }
 
 // ---- window ----------------------------------------------------------------
-function createSplash() {
-  mainWindow = new BrowserWindow({
-    ...readBounds(),
-    show: false,
-    backgroundColor: "#000000",
-    title: "Streamify",
-    icon: iconPath(),
-    webPreferences: { contextIsolation: true, nodeIntegration: false },
-  });
-  void mainWindow.loadFile(path.join(__dirname, "splash.html"));
-  mainWindow.once("ready-to-show", () => mainWindow?.show());
-  return mainWindow;
+// The boot splash and the app share ONE window. Building a second window and
+// destroying the first makes the taskbar entry disappear and reappear, which
+// reads as the app closing and reopening mid-boot.
+function splashUrl() {
+  return "file://" + path.join(__dirname, "splash.html").replace(/\\/g, "/");
 }
 
-function createWindow() {
+function failureHtml(detail) {
+  return `<body style="background:#000;color:#eee;font:14px system-ui;padding:40px">
+      <h2>Streamify failed to start</h2>
+      <pre style="color:#f88;white-space:pre-wrap">${detail.replace(/</g, "&lt;")}</pre>
+      </body>`;
+}
+
+function createSplash() {
+  return createWindow({ splash: true });
+}
+
+function createWindow({ splash = false } = {}) {
   mainWindow = new BrowserWindow({
     ...readBounds(),
     minWidth: 960,
@@ -469,9 +473,12 @@ function createWindow() {
   });
 
   mainWindow.webContents.on("did-finish-load", () => {
-    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
-      mainWindow.show();
-    }
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (!mainWindow.isVisible()) mainWindow.show();
+    // Splash/failure docs (file://, data:) load in this same window during
+    // boot — the app server isn't up yet, so the link must wait for the real
+    // app document. Only http(s) counts.
+    if (!mainWindow.webContents.getURL().startsWith("http")) return;
     // Cold start: a streamify-desktop:// URL may sit in process.argv (Windows
     // and Linux launch the app with the link when nothing is running). The
     // pending map only exists in this process, so honouring it on first load is
@@ -498,7 +505,8 @@ function createWindow() {
     mainWindow = null;
   });
 
-  void mainWindow.loadURL(APP_ORIGIN);
+  void mainWindow.loadURL(splash ? splashUrl() : APP_ORIGIN);
+  if (splash) mainWindow.once("ready-to-show", () => mainWindow?.show());
   return mainWindow;
 }
 
@@ -785,6 +793,7 @@ async function boot() {
   // Never set in a packaged build (kept only as a reminder of the switch name).
 
   const splash = createSplash();
+  bootLog(`[boot] splash in window #${splash.id} (windows=${BrowserWindow.getAllWindows().length})`);
 
   try {
     await startApi();
@@ -792,20 +801,16 @@ async function boot() {
     await waitForHttp(`${APP_ORIGIN}/`);
   } catch (error) {
     const detail = error instanceof Error ? error.stack || error.message : String(error);
-    const html = `<body style="background:#000;color:#eee;font:14px system-ui;padding:40px">
-      <h2>Streamify failed to start</h2>
-      <pre style="color:#f88;white-space:pre-wrap">${detail.replace(/</g, "&lt;")}</pre>
-      </body>`;
-    await splash.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
+    await splash.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(failureHtml(detail)));
     return;
   }
 
-  splash.destroy();
-  mainWindow = null;
+  // Same window: swap the splash document for the app. Destroying and
+  // rebuilding made the taskbar entry blink out and back.
+  await mainWindow.loadURL(APP_ORIGIN);
   isBooting = false;
-  bootLog("[boot] ready — opening main window");
+  bootLog(`[boot] ready — opening main window #${mainWindow.id} (windows=${BrowserWindow.getAllWindows().length})`);
   wireSelfUpdate();
-  createWindow();
 }
 
 app.on("before-quit", () => {
