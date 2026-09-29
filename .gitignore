@@ -14,3 +14,7 @@ release.old/
 # yt-dlp binaries are fetched at build time by scripts/fetch-ytdlp.mjs
 # (CI downloads the right one per OS); never commit the 17-40MB blobs.
 resources/bin/
+# Local agent plans — working notes, not repo content
+.hermes/
+# Scratch screenshots from UI probes
+shot.png
