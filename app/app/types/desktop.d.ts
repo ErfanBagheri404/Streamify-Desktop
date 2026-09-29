@@ -103,6 +103,8 @@ export interface StreamifyDesktopBridge {
   auth?: {
     /** Open the webplayer confirm page in the OS browser. */
     start: () => AuthStartResult;
+    /** Claim a redeem result the push missed (delivered at most once). */
+    take: () => AuthResult | null;
     /** Fires once when the deep link round-trip succeeded. */
     onResult: (callback: (result: AuthResult) => void) => () => void;
     /** Fires when the attempt failed, expired, or was rejected. */

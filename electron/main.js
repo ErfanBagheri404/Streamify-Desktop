@@ -162,6 +162,9 @@ const WEBPLAYER_ORIGIN = (process.env.STREAMIFY_WEBPLAYER_URL || "https://stream
 const AUTH_PENDING_TTL_MS = 5 * 60 * 1000;
 // state -> { verifier, nonce, expiresAt }
 const authPending = new Map();
+// Last successful redeem, kept until a renderer claims it. Guards the race
+// where the deep link lands before the window's listener is attached.
+let pendingAuthResult = null;
 
 function base64url(buffer) {
   return buffer.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -236,11 +239,18 @@ async function redeemGrant(grant, entry) {
     emitAuthError("Sign-in response did not match this device. Please try again.");
     return;
   }
-  send("desktop:auth-result", {
+  const result = {
     token_hash: payload.token_hash,
     type: typeof payload.type === "string" ? payload.type : "magiclink",
     email: typeof payload.email === "string" ? payload.email : undefined,
-  });
+  };
+  // The renderer may not have its listener attached yet (window reloading, user
+  // on another route, or the app was just launched by the deep link), so the
+  // result is buffered as well as pushed. The renderer claims it via
+  // desktop:auth-take if the push was missed. Whichever path runs first wins.
+  pendingAuthResult = result;
+  bootLog(`[auth] grant redeemed ok email=${result.email || "unknown"}`);
+  send("desktop:auth-result", result);
   showWindow();
 }
 
@@ -291,6 +301,13 @@ ipcMain.on("desktop:auth-start", (event) => {
   } catch (error) {
     event.returnValue = { ok: false, message: error instanceof Error ? error.message : String(error) };
   }
+});
+
+// Claim a redeem result that the push missed (listener not attached yet).
+// Reading clears it, so a result is still delivered exactly once.
+ipcMain.on("desktop:auth-take", (event) => {
+  event.returnValue = pendingAuthResult;
+  pendingAuthResult = null;
 });
 
 // macOS delivers custom-protocol URLs here. Windows/Linux deliver them via

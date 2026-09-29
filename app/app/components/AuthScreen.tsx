@@ -159,32 +159,44 @@ export default function AuthScreen({ mode }: AuthScreenProps) {
     setDesktopAuthAvailable(true);
 
     const offResult = bridge.auth.onResult((result) => {
-      setIsDesktopAuthPending(false);
-      if (!supabase) {
-        setErrorMessage(authUnavailableMessage);
-        return;
-      }
-      void supabase.auth
-        .verifyOtp({ token_hash: result.token_hash, type: "magiclink" })
-        .then(({ error }) => {
-          if (error) {
-            setErrorMessage(error.message);
-            return;
-          }
-          setMessage(t("auth.signedIn"));
-          router.replace("/settings");
-          router.refresh();
-        });
+      void exchangeTokenHash(result);
     });
     const offError = bridge.auth.onError((error) => {
       setIsDesktopAuthPending(false);
       setErrorMessage(error.message);
     });
+    // Pull path: if the deep link already redeemed while this window had no
+    // listener (reload, cold start), main buffered the result for us.
+    const missed = bridge.auth.take();
+    if (missed && typeof missed.token_hash === "string") {
+      void exchangeTokenHash(missed);
+    }
     return () => {
       offResult();
       offError();
     };
   }, [router, supabase, t]);
+
+  const exchangeTokenHash = (result: { token_hash: string }) => {
+    setIsDesktopAuthPending(false);
+    if (!supabase) {
+      setErrorMessage(authUnavailableMessage);
+      return Promise.resolve();
+    }
+    return supabase.auth
+      .verifyOtp({ token_hash: result.token_hash, type: "magiclink" })
+      .then(({ error }) => {
+        if (error) {
+          setErrorMessage(
+            `Sign-in finished in the browser, but this app could not store the session: ${error.message}`
+          );
+          return;
+        }
+        setMessage(t("auth.signedIn"));
+        router.replace("/");
+        router.refresh();
+      });
+  };
 
   const startDesktopAuth = () => {
     const bridge = window.streamifyDesktop;

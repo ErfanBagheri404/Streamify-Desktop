@@ -44,6 +44,8 @@ contextBridge.exposeInMainWorld("streamifyDesktop", {
   // the already-verified token hash and hands it to Supabase.
   auth: {
     start: () => ipcRenderer.sendSync("desktop:auth-start"),
+    // Claim a redeem result the push missed (listener not attached yet).
+    take: () => ipcRenderer.sendSync("desktop:auth-take"),
     onResult: (callback) => {
       const listener = (_event, payload) => callback(payload);
       ipcRenderer.on("desktop:auth-result", listener);
