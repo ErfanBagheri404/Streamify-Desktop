@@ -4,23 +4,37 @@
 <meta charset="utf8"/>
 <style>
   html,body{margin:0;height:100%;background:#000;color:#fff;display:flex;align-items:center;justify-content:center}
-  /* Atom spinner: three rings tumbling inside a circle.
-     100% opacity, 1700ms per revolution, linear easing (no easing
-     distortion of the ring motion). Size 128 = "large". */
-  .atom{width:128px;height:128px;opacity:1}
-  .ring{fill:none;stroke:currentColor;stroke-width:8}
-  @keyframes spin{to{transform:rotate(360deg)}}
-  .spin{transform-origin:64px 64px;animation:spin 1700ms linear infinite}
+  /* Exact loading.dev/atom geometry (CSS 3D rings, not SVG), inlined so the
+     packaged app ships no extra dependency.
+     size=large(128px), duration=1700ms, linear, opacity 1. */
+  .ld-atom{position:relative;width:var(--ld-size,128px);height:var(--ld-size,128px);opacity:1}
+  .ld-atom-shell{position:absolute;inset:0;box-sizing:border-box;
+    border:calc(var(--ld-size,128px) * 0.055) solid currentColor;border-radius:9999px}
+  .ld-atom-orbit{position:absolute;inset:0;transform-style:preserve-3d;
+    transform:rotate(var(--ld-atom-tilt)) rotateX(90deg)}
+  .ld-atom-ring{position:absolute;inset:0;box-sizing:border-box;
+    border:calc(var(--ld-size,128px) * 0.045) solid currentColor;border-radius:9999px;
+    transform:rotateX(90deg)}
+  .ld-atom-spin{position:absolute;inset:0;transform-style:preserve-3d;transform-origin:center;
+    animation:ld-atom-rotate var(--ld-duration,1700ms) linear infinite;
+    animation-delay:calc(var(--ld-duration,1700ms) * (var(--ld-step) - 3) / 3);
+    animation-play-state:running}
+  @keyframes ld-atom-rotate{to{transform:rotate(360deg)}}
+  @media (prefers-reduced-motion:reduce){.ld-atom-spin{animation:none;transform:rotate(60deg)}}
 </style>
 </head>
 <body>
-<svg class="atom" viewBox="0 0 128 128" role="img" aria-label="Loading">
-  <g class="spin">
-    <circle class="ring" cx="64" cy="64" r="58"/>
-    <ellipse class="ring" cx="64" cy="64" rx="58" ry="22"/>
-    <ellipse class="ring" cx="64" cy="64" rx="58" ry="22" transform="rotate(60 64 64)"/>
-    <ellipse class="ring" cx="64" cy="64" rx="58" ry="22" transform="rotate(120 64 64)"/>
-  </g>
-</svg>
+<div class="ld-atom" style="--ld-size:128px;--ld-duration:1700ms" aria-hidden="true">
+  <div class="ld-atom-shell"></div>
+  <div class="ld-atom-orbit" style="--ld-atom-tilt:0deg">
+    <div class="ld-atom-spin" style="--ld-step:0"><div class="ld-atom-ring"></div></div>
+  </div>
+  <div class="ld-atom-orbit" style="--ld-atom-tilt:60deg">
+    <div class="ld-atom-spin" style="--ld-step:1"><div class="ld-atom-ring"></div></div>
+  </div>
+  <div class="ld-atom-orbit" style="--ld-atom-tilt:120deg">
+    <div class="ld-atom-spin" style="--ld-step:2"><div class="ld-atom-ring"></div></div>
+  </div>
+</div>
 </body>
 </html>
