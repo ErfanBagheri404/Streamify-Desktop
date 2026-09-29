@@ -1,8 +1,26 @@
-<!doctype html><html><head><meta charset="utf8"/><style>
-html,body{margin:0;height:100%;background:#000;color:#fff;display:flex;align-items:center;justify-content:center;font:14px/-apple-system system-ui;flex-direction:column;gap:12px}
-.logo{width:64px;height:64px;animation:pulse 1.4s ease-in-out infinite}
-@keyframes pulse{50%{opacity:.4}}
-</style></head><body>
-<img class="logo" src="../app/public/StreamifyLogo.svg"></img>
-<div>Starting Streamify...</div>
-</body></html>
+<!doctype html>
+<html>
+<head>
+<meta charset="utf8"/>
+<style>
+  html,body{margin:0;height:100%;background:#000;color:#fff;display:flex;align-items:center;justify-content:center}
+  /* Atom spinner: three rings tumbling inside a circle.
+     100% opacity, 1700ms per revolution, linear easing (no easing
+     distortion of the ring motion). Size 128 = "large". */
+  .atom{width:128px;height:128px;opacity:1}
+  .ring{fill:none;stroke:currentColor;stroke-width:8}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .spin{transform-origin:64px 64px;animation:spin 1700ms linear infinite}
+</style>
+</head>
+<body>
+<svg class="atom" viewBox="0 0 128 128" role="img" aria-label="Loading">
+  <g class="spin">
+    <circle class="ring" cx="64" cy="64" r="58"/>
+    <ellipse class="ring" cx="64" cy="64" rx="58" ry="22"/>
+    <ellipse class="ring" cx="64" cy="64" rx="58" ry="22" transform="rotate(60 64 64)"/>
+    <ellipse class="ring" cx="64" cy="64" rx="58" ry="22" transform="rotate(120 64 64)"/>
+  </g>
+</svg>
+</body>
+</html>
