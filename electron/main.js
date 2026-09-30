@@ -450,6 +450,12 @@ function createWindow({ splash = false } = {}) {
     backgroundColor: "#000000",
     title: "Streamify Desktop",
     icon: iconPath(),
+    // The native title bar is tinted by the Windows accent color while the
+    // menu bar directly under it is neutral #1f1f1f, so the two rows read as
+    // different materials. Hiding the title bar and drawing the caption
+    // buttons in that same gray makes the whole top strip one color.
+    titleBarStyle: "hidden",
+    titleBarOverlay: { color: "#1f1f1f", symbolColor: "#e3e3e3", height: 30 },
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -702,17 +708,38 @@ function wireSelfUpdate() {
   }, 15000);
 }
 
+// GitHub returns release notes as HTML (<p>, <br>, <li>) but the update modal
+// renders plain text, so tags must never reach the renderer.
+function stripHtml(html) {
+  const text = String(html)
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|h[1-6]|tr)>/gi, "\n")
+    .replace(/<li[^>]*>/gi, "• ")
+    .replace(/<[^>]+>/g, "");
+  return text
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&amp;/g, "&") // last, so entities decode exactly once
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function releaseNotesText(info) {
   if (!info) return null;
   const notes = info.releaseNotes;
   if (!notes) return null;
-  if (typeof notes === "string") return notes.slice(0, 2000);
+  if (typeof notes === "string") return stripHtml(notes).slice(0, 2000);
   if (Array.isArray(notes)) {
-    return notes
-      .map((entry) => (entry && entry.note ? String(entry.note) : ""))
-      .filter(Boolean)
-      .join("\n\n")
-      .slice(0, 2000);
+    return stripHtml(
+      notes
+        .map((entry) => (entry && entry.note ? String(entry.note) : ""))
+        .filter(Boolean)
+        .join("\n\n"),
+    ).slice(0, 2000);
   }
   return null;
 }

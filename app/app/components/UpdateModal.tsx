@@ -68,7 +68,7 @@ export default function UpdateModal() {
 
   return (
     <div
-      className="fixed inset-0 z-[80] flex items-center justify-center px-4 py-6"
+      className="update-modal-overlay fixed inset-0 z-[80] flex items-center justify-center px-4 py-6"
       style={{ background: "rgba(0, 0, 0, 0.62)", backdropFilter: "blur(10px)" }}
       onClick={phase === "downloading" ? undefined : () => setOpen(false)}
       role="dialog"
@@ -76,7 +76,7 @@ export default function UpdateModal() {
       aria-label={t("update.availableTitle")}
     >
       <div
-        className="theme-surface w-full max-w-md rounded-3xl border p-5 text-[color:var(--foreground)] shadow-[0_24px_64px_rgba(0,0,0,0.45)] md:p-6"
+        className="update-modal-card theme-surface w-full max-w-lg rounded-3xl border p-6 text-[color:var(--foreground)] shadow-[0_24px_64px_rgba(0,0,0,0.45)] md:p-7"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-4">
@@ -126,11 +126,27 @@ export default function UpdateModal() {
         </p>
 
         {notes && phase === "available" && (
-          <div className="theme-surface-strong mt-4 max-h-40 overflow-y-auto rounded-2xl border p-3">
+          <div className="theme-surface-strong mt-4 max-h-56 overflow-y-auto rounded-2xl border p-4">
             <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: "var(--muted-foreground)" }}>
               {t("update.releaseNotes")}
             </p>
-            <p className="mt-1 whitespace-pre-wrap text-sm">{notes}</p>
+            <div className="mt-2 space-y-2 text-sm leading-relaxed">
+              {notes.split("\n").map((line, i) => {
+                const text = line.trim();
+                if (!text) return null;
+                const isBullet = text.startsWith("• ");
+                return (
+                  <p key={i} className={isBullet ? "flex gap-2" : ""}>
+                    {isBullet && (
+                      <span aria-hidden="true" style={{ color: "var(--theme-accent)" }}>
+                        •
+                      </span>
+                    )}
+                    <span className={isBullet ? "" : "whitespace-pre-wrap"}>{isBullet ? text.slice(2) : text}</span>
+                  </p>
+                );
+              })}
+            </div>
           </div>
         )}
 
