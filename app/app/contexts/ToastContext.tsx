@@ -264,6 +264,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     <ToastContext.Provider value={value}>
       {children}
       <div
+        data-toast-container=""
         className={`pointer-events-none fixed left-1/2 top-4 z-[70] flex -translate-x-1/2 px-4 transition-all duration-200 ${
           toast ? "translate-y-0 opacity-100" : "-translate-y-2 opacity-0"
         }`}

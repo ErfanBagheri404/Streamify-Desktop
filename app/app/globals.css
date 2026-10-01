@@ -1126,3 +1126,58 @@ html[data-community-banner="off"] .community-banner {
   display: none;
 }
 
+/* Desktop in-window title strip. It is opaque and drawn over the content, so
+   the body has to start below it. --overlay-title-bar-height mirrors the
+   h-9 strip in OverlayTitleBar.tsx and is asserted there; the inset is applied
+   pre-paint by an inline script in layout.tsx (data-overlay-title-bar) so
+   nothing jumps underneath the strip on load. */
+html[data-overlay-title-bar="on"] {
+  --overlay-title-bar-height: 2.25rem;
+}
+
+html[data-overlay-title-bar="on"] body {
+  padding-top: calc(var(--overlay-title-bar-height) + 0.5rem);
+}
+
+@media (min-width: 640px) {
+  html[data-overlay-title-bar="on"] body {
+    padding-top: calc(var(--overlay-title-bar-height) + 0.75rem);
+  }
+}
+
+/* The community banner and the title strip are both fixed at the top, so
+   they stack: the banner keeps its own offset below the strip. */
+html[data-overlay-title-bar="on"][data-community-banner="on"] body {
+  padding-top: calc(
+    var(--overlay-title-bar-height) + var(--community-banner-height, 2.25rem) +
+      0.5rem
+  );
+}
+
+@media (min-width: 640px) {
+  html[data-overlay-title-bar="on"][data-community-banner="on"] body {
+    padding-top: calc(
+      var(--overlay-title-bar-height) + var(--community-banner-height, 2.25rem) +
+        0.75rem
+    );
+  }
+}
+
+html[data-overlay-title-bar="on"] .community-banner {
+  top: var(--overlay-title-bar-height);
+}
+
+/* Toasts are fixed at the top (top-4, z-70), so the opaque strip would cover
+   them. Push the container down instead of raising it: the strip stays the
+   top-most surface, which is what a window caption must be. */
+html[data-overlay-title-bar="on"] [data-toast-container] {
+  top: calc(var(--overlay-title-bar-height) + 0.75rem);
+}
+
+/* Auth screens are full-bleed (body padding is zeroed for them), so they own
+   the strip's inset themselves. !important is required: the base auth rule
+   zeroes all padding, and without it the strip would cover the sign-in card. */
+html[data-overlay-title-bar="on"] body:has(main[data-auth-page="true"]) {
+  padding-top: var(--overlay-title-bar-height) !important;
+}
+

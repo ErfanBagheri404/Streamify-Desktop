@@ -72,7 +72,14 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     root.classList.toggle("reduce-motion", settings.disableAnimations);
 
     // Desktop shell: keep the native window frame in sync with the app theme.
-    window.streamifyDesktop?.setTheme?.(themeMode);
+    // The resolved colours go over the bridge too — the caption buttons are
+    // drawn by the OS, so without them the top strip would stay on a fixed
+    // dark while the rest of the window follows the selected palette.
+    const styles = getComputedStyle(root);
+    window.streamifyDesktop?.setTheme?.(themeMode, {
+      background: styles.getPropertyValue("--background").trim(),
+      foreground: styles.getPropertyValue("--foreground").trim(),
+    });
 
     return () => {
       root.classList.remove("reduce-motion");

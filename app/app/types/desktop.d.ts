@@ -75,7 +75,10 @@ export interface StreamifyDesktopBridge {
   isDesktop: true;
   /** Packaged app version, e.g. "0.1.0". */
   version: string;
-  setTheme?: (theme: "light" | "dark") => void;
+  setTheme?: (
+    theme: "light" | "dark",
+    colors?: { background: string; foreground: string }
+  ) => void;
   /** Subscribe to main-process menu / tray / media-key / MPRIS commands.
    *  Each command is `{ command, payload }`; payload carries the seek position
    *  (seconds) for `seek`. Returns an unsubscribe. */
@@ -94,6 +97,29 @@ export interface StreamifyDesktopBridge {
     onDownloaded: (callback: (info: { version: string }) => void) => void;
     onNotAvailable: (callback: () => void) => void;
     onError: (callback: (info: { message: string }) => void) => void;
+  };
+  /**
+   * In-window overlay row (the strip drawn on top of the app content): dots
+   * menu, back/forward chevrons. Present only in the desktop build.
+   */
+  titleBar?: {
+    /** Pop the application menu (File, Edit, View, Playback, Help). */
+    openMenu: () => void;
+    // Back/forward are driven by the renderer's own Navigation API, so there is
+    // no bridge surface for them — see OverlayTitleBar.
+  };
+  /**
+   * Proxy: main owns the setting (it decides how the Next child reaches the
+   * network); the renderer just mirrors it for the UI.
+   */
+  proxy?: {
+    /** Current proxy config: "system" | "manual" | "off" plus the manual URL. */
+    get: () => Promise<{ mode: string; url: string }>;
+    /** Save a proxy config. Returns it plus restartRequired. */
+    set: (config: {
+      mode: "system" | "manual" | "off";
+      url: string;
+    }) => Promise<{ mode: string; url: string; restartRequired: boolean }>;
   };
   /**
    * Browser-mediated sign-in. The desktop never takes a password: main opens

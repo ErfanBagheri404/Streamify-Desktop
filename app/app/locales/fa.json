@@ -530,5 +530,13 @@
   "settings.desktopNotifications": "اعلان آهنگ در حال پخش",
   "settings.desktopNotificationsDescription": "با تغییر آهنگ، اعلان سیستمی با نام آهنگ، خواننده و کاور نمایش بده.",
   "settings.resumeLastTrack": "ادامه از آخرین نقطه",
-  "settings.resumeLastTrackDescription": "هنگام اجرا، آخرین آهنگ و موقعیت را باز کن، مثل اسپاتیفای."
+  "settings.resumeLastTrackDescription": "هنگام اجرا، آخرین آهنگ و موقعیت را باز کن، مثل اسپاتیفای.",
+  "settings.proxy": "پراکسی",
+  "settings.proxyDescription": "نحوه اتصال استریمیفای به شبکه. «سیستم» از تنظیمات پراکسی سیستم‌عامل پیروی می‌کند؛ برای پراکسی‌ای که به‌صورت سراسری تنظیم نشده «دستی» را انتخاب کن، یا برای اتصال مستقیم «خاموش» را.",
+  "settings.proxySystem": "سیستم",
+  "settings.proxyManual": "دستی",
+  "settings.proxyOff": "خاموش",
+  "settings.proxyUrlPlaceholder": "http://127.0.0.1:10808",
+  "settings.proxyApply": "اعمال",
+  "settings.proxyRestartRequired": "پراکسی ذخیره شد. برای اعمال روی درخواست‌های پس‌زمینه، استریمیفای را دوباره اجرا کن." 
 }

@@ -195,6 +195,109 @@ function ThemeChoiceCard({
   );
 }
 
+type ProxyMode = "system" | "manual" | "off";
+
+// Proxy is main-owned (it decides how the Next child reaches the network), so
+// this row only mirrors it. The server reads its proxy env once at startup, so
+// main reports restartRequired and we surface that instead of pretending the
+// change already took effect.
+function ProxySetting() {
+  const { t } = useAppLanguage();
+  const { showToast } = useToast();
+  const [mode, setMode] = useState<ProxyMode>("system");
+  const [url, setUrl] = useState("");
+  const [draftUrl, setDraftUrl] = useState("");
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    window.streamifyDesktop?.proxy
+      ?.get()
+      .then((config) => {
+        if (cancelled) return;
+        setMode(config.mode as ProxyMode);
+        setUrl(config.url);
+        setDraftUrl(config.url);
+      })
+      .catch(() => {})
+      .finally(() => !cancelled && setReady(true));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (!ready) return null;
+
+  const save = async (next: { mode: ProxyMode; url: string }) => {
+    setMode(next.mode);
+    setUrl(next.url);
+    setDraftUrl(next.url);
+    try {
+      const result = await window.streamifyDesktop?.proxy?.set(next);
+      if (result?.restartRequired) {
+        showToast({
+          message: t("settings.proxyRestartRequired"),
+          tone: "success",
+          durationMs: 4200,
+        });
+      }
+    } catch {
+      // Main rejected the write; the row already shows the attempted value, so
+      // read the truth back rather than leaving a lie on screen.
+      const current = await window.streamifyDesktop?.proxy?.get().catch(() => null);
+      if (current) {
+        setMode(current.mode as ProxyMode);
+        setUrl(current.url);
+        setDraftUrl(current.url);
+      }
+    }
+  };
+
+  return (
+    <div className="grid gap-3">
+      <div className="flex flex-wrap gap-2">
+        <ChoiceChip
+          label={t("settings.proxySystem")}
+          selected={mode === "system"}
+          onClick={() => void save({ mode: "system", url })}
+        />
+        <ChoiceChip
+          label={t("settings.proxyManual")}
+          selected={mode === "manual"}
+          onClick={() => void save({ mode: "manual", url })}
+        />
+        <ChoiceChip
+          label={t("settings.proxyOff")}
+          selected={mode === "off"}
+          onClick={() => void save({ mode: "off", url })}
+        />
+      </div>
+
+      {mode === "manual" ? (
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <input
+            type="text"
+            value={draftUrl}
+            onChange={(event) => setDraftUrl(event.target.value)}
+            placeholder={t("settings.proxyUrlPlaceholder")}
+            spellCheck={false}
+            autoComplete="off"
+            className="theme-button-soft min-w-0 flex-1 rounded-xl border px-3 py-2 text-sm text-[color:var(--foreground)] outline-none transition placeholder:text-[color:color-mix(in_srgb,var(--foreground)_35%,transparent)] focus:border-[color:color-mix(in_srgb,var(--foreground)_25%,transparent)]"
+          />
+          <button
+            type="button"
+            onClick={() => void save({ mode: "manual", url: draftUrl })}
+            disabled={draftUrl.trim() === url.trim()}
+            className="theme-button-soft shrink-0 rounded-xl border px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-45"
+          >
+            {t("settings.proxyApply")}
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function Section({
   eyebrow,
   title,
@@ -822,6 +925,12 @@ export default function SettingsPage() {
                     }
                   />
                 }
+              />
+              <SettingRow
+                label={t("settings.proxy")}
+                description={t("settings.proxyDescription")}
+                layout="stacked"
+                control={<ProxySetting />}
               />
                 </Section>
               )}

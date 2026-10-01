@@ -51,6 +51,9 @@ let isQuitting = false;
 // window-all-closed fires when the splash is destroyed mid-boot, which would
 // quit the app before the real window exists.
 let isBooting = true;
+// One-shot: the boot splash entry is dropped from history the first time a
+// real http app document finishes loading.
+let splashHistoryCleared = false;
 
 // ---- single instance -------------------------------------------------------
 // The streamify-desktop://auth?grant&state deep link can only arrive on the
@@ -157,6 +160,53 @@ function persistBounds() {
     fs.mkdirSync(app.getPath("userData"), { recursive: true });
     fs.writeFileSync(boundsFile(), JSON.stringify(mainWindow.getNormalBounds()));
   } catch {}
+}
+
+// ---- proxy ------------------------------------------------------------------
+// The Next child is plain Node and cannot read the Windows proxy settings, so
+// the mode is resolved here and handed over as env (see resolveProxyUrl +
+// instrumentation.ts). Chromium gets the same value through setProxy, so the
+// renderer and the server always agree.
+const PROXY_MODES = ["system", "manual", "off"];
+
+function proxyFile() {
+  return path.join(app.getPath("userData"), "proxy.json");
+}
+
+function readProxyConfig() {
+  try {
+    const saved = JSON.parse(fs.readFileSync(proxyFile(), "utf8"));
+    const mode = PROXY_MODES.includes(saved?.mode) ? saved.mode : "system";
+    const url = typeof saved?.url === "string" ? saved.url.trim() : "";
+    return { mode, url };
+  } catch {
+    return { mode: "system", url: "" };
+  }
+}
+
+function writeProxyConfig(config) {
+  try {
+    fs.mkdirSync(app.getPath("userData"), { recursive: true });
+    fs.writeFileSync(proxyFile(), JSON.stringify(config));
+  } catch {}
+}
+
+// A bare "host:port" is what people paste, so accept it and assume http://.
+function normalizeProxyUrl(value) {
+  const trimmed = (value || "").trim();
+  if (!trimmed) return "";
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+}
+
+// "off" must bypass the system settings too, so it maps to "direct://" rather
+// than "system://" — Chromium's proxy rules treat direct:// as always-direct.
+function proxyRulesFor(config) {
+  if (config.mode === "off") return "direct://";
+  if (config.mode === "manual") {
+    const url = normalizeProxyUrl(config.url);
+    return url ? url : "direct://";
+  }
+  return "system://";
 }
 
 // ---- desktop auth handoff (browser-mediated device grant) ------------------
@@ -362,7 +412,44 @@ async function startApi() {
 }
 
 // ---- Next child process ----------------------------------------------------
-function startNext() {
+// Chromium resolves the system proxy for the renderer, but the Next child is
+// plain Node (undici) and ignores it — so resolve the proxy here and hand it
+// over as env. instrumentation.ts turns that into a global proxy dispatcher.
+// Without this the Supabase auth handoff fails with ENOTFOUND / Failed to
+// fetch whenever a system proxy is set or local DNS is unreliable.
+async function resolveProxyUrl() {
+  const config = readProxyConfig();
+
+  if (config.mode === "off") {
+    bootLog("[proxy] disabled by setting");
+    return null;
+  }
+  if (config.mode === "manual") {
+    const url = normalizeProxyUrl(config.url);
+    bootLog(`[proxy] manual -> ${url || "(empty, direct)"}`);
+    return url || null;
+  }
+
+  if (!mainWindow || mainWindow.isDestroyed()) return null;
+  try {
+    // "direct://" means no proxy — don't pass that to undici.
+    const resolved = await mainWindow.webContents.session.resolveProxy(
+      "https://hrlmsfsifdtvndrgpxth.supabase.co"
+    );
+    const match = /^(PROXY|SOCKS5?|HTTPS?)\s+(\S+)/i.exec(resolved || "");
+    if (!match) return null;
+    const host = match[2];
+    const scheme = /^socks/i.test(match[1]) ? "socks5" : "http";
+    const url = `${scheme}://${host}`;
+    bootLog(`[proxy] system proxy for supabase -> ${url}`);
+    return url;
+  } catch (error) {
+    bootLog(`[proxy] resolveProxy failed: ${error?.message || error}`);
+    return null;
+  }
+}
+
+async function startNext() {
   const appDir = path.join(ROOT, "app");
 
   // No --hostname: Next then binds all interfaces, so both `localhost` (IPv6,
@@ -395,18 +482,26 @@ function startNext() {
         String(APP_PORT),
       ];
 
+  // Chromium resolves the system proxy for the renderer, but the Next child
+  // is plain Node (undici) and ignores it — so hand it the resolved proxy URL
+  // explicitly. instrumentation.ts turns that into a global proxy dispatcher.
+  // Without this the Supabase auth handoff fails with ENOTFOUND/Failed to
+  // fetch whenever a system proxy is set or local DNS is unreliable.
+  const proxyUrl = await resolveProxyUrl();
+
   nextProc = spawn(process.execPath, args, {
-      cwd: isStandalone ? standaloneDir : appDir,
-      env: {
-        ...process.env,
-        NEXT_TELEMETRY_DISABLED: "1",
-        PORT: String(APP_PORT),
-        HOSTNAME: "0.0.0.0",
-        STREAMIFY_API_PORT: String(API_PORT),
-        // Without this the Electron binary runs the script as another Electron
-        // app instead of plain node — the packaged build needs no system Node.
-        ELECTRON_RUN_AS_NODE: "1",
-      },
+    cwd: isStandalone ? standaloneDir : appDir,
+    env: {
+      ...process.env,
+      NEXT_TELEMETRY_DISABLED: "1",
+      PORT: String(APP_PORT),
+      HOSTNAME: "0.0.0.0",
+      STREAMIFY_API_PORT: String(API_PORT),
+      // Without this the Electron binary runs the script as another Electron
+      // app instead of plain node — the packaged build needs no system Node.
+      ELECTRON_RUN_AS_NODE: "1",
+      ...(proxyUrl ? { HTTPS_PROXY: proxyUrl, HTTP_PROXY: proxyUrl } : {}),
+    },
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     }
@@ -450,12 +545,12 @@ function createWindow({ splash = false } = {}) {
     backgroundColor: "#000000",
     title: "Streamify Desktop",
     icon: iconPath(),
-    // The native title bar is tinted by the Windows accent color while the
-    // menu bar directly under it is neutral #1f1f1f, so the two rows read as
-    // different materials. Hiding the title bar and drawing the caption
-    // buttons in that same gray makes the whole top strip one color.
+    // The native title bar is tinted by the Windows accent color, so it is
+    // hidden and the caption buttons are drawn by the overlay instead. The
+    // overlay colour is re-painted on theme change (see applyTheme) to match
+    // the in-window strip, otherwise the two read as different materials.
     titleBarStyle: "hidden",
-    titleBarOverlay: { color: "#1f1f1f", symbolColor: "#e3e3e3", height: 30 },
+    titleBarOverlay: { color: "#050505", symbolColor: "#e3e3e3", height: 36 },
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -463,6 +558,22 @@ function createWindow({ splash = false } = {}) {
       sandbox: false,
     },
   });
+
+  // Same proxy the Next child gets, so the renderer never disagrees with the
+  // server about how to reach the network.
+  try {
+    const config = readProxyConfig();
+    const rules = proxyRulesFor(config);
+    mainWindow.webContents.session.setProxy({
+      proxyRules: rules,
+      // localhost is the app itself and the in-process API; proxying it would
+      // loop the renderer's own requests back through the proxy.
+      proxyBypassRules: "localhost,127.0.0.1,[::1]",
+    });
+    bootLog(`[proxy] renderer rules=${rules}`);
+  } catch (error) {
+    bootLog(`[proxy] setProxy failed: ${error?.message || error}`);
+  }
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (isLocalUrl(url)) return { action: "allow" };
@@ -485,6 +596,14 @@ function createWindow({ splash = false } = {}) {
     // boot — the app server isn't up yet, so the link must wait for the real
     // app document. Only http(s) counts.
     if (!mainWindow.webContents.getURL().startsWith("http")) return;
+    // The splash document is the previous history entry, so the overlay's Back
+    // chevron would walk back into a dead boot screen. Drop it once, as soon as
+    // the real app document is up (doing it right after loadURL races the
+    // navigation and gets discarded).
+    if (!splashHistoryCleared) {
+      splashHistoryCleared = true;
+      mainWindow.webContents.navigationHistory.clear();
+    }
     // Cold start: a streamify-desktop:// URL may sit in process.argv (Windows
     // and Linux launch the app with the link when nothing is running). The
     // pending map only exists in this process, so honouring it on first load is
@@ -550,6 +669,54 @@ ipcMain.on("desktop:position", (_event, seconds) => {
   integration.publishMprisPosition(Number(seconds) || 0);
 });
 
+// ---- in-window overlay title bar -------------------------------------------
+// The native title bar is hidden (titleBarStyle: "hidden") and the old menu
+// bar row is gone, so the app draws its own strip INSIDE the window, on top of
+// the content: dots menu + back/forward on the left, OS caption buttons on the
+// right. main only serves the two commands the renderer can't do itself.
+
+// Pops the existing application menu. No coordinates: the mouse cursor is
+// already on the dots button when this arrives, and menu.popup defaults to the
+// cursor position — that sidesteps all window/screen/DPI coordinate math.
+ipcMain.on("desktop:menu-popup", (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+  const menu = Menu.getApplicationMenu();
+  if (win && menu) menu.popup({ window: win });
+});
+
+// ---- proxy setting ----------------------------------------------------------
+// Changing the proxy needs the Next child restarted, so the renderer only
+// writes the setting; main applies it and reloads the window. The restart is
+// deferred to the next launch for the server (spawning it mid-flight would
+// blank the app), but Chromium picks it up immediately.
+ipcMain.handle("desktop:proxy-get", () => readProxyConfig());
+
+ipcMain.handle("desktop:proxy-set", (_event, next) => {
+  const previous = readProxyConfig();
+  const mode = PROXY_MODES.includes(next?.mode) ? next.mode : "system";
+  const config = { mode, url: normalizeProxyUrl(next?.url) };
+  writeProxyConfig(config);
+  bootLog(`[proxy] saved mode=${mode}`);
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.session
+      .setProxy({
+        proxyRules: proxyRulesFor(config),
+        proxyBypassRules: "localhost,127.0.0.1,[::1]",
+      })
+      .catch((error) => bootLog(`[proxy] setProxy failed: ${error?.message || error}`));
+  }
+
+  // The Next child read the proxy env once at startup (instrumentation.ts), so
+  // a change only reaches the server on the next launch. Say so instead of
+  // silently leaving sign-in broken.
+  return {
+    ...config,
+    restartRequired:
+      previous.mode !== config.mode || previous.url !== config.url,
+  };
+});
+
 // ---- menu + media keys + tray ---------------------------------------------
 function send(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -574,6 +741,11 @@ function buildMenu() {
         { type: "separator" },
         { role: "quit", accelerator: "CmdOrCtrl+Q" },
       ],
+    },
+    {
+      // Present in the reference bar the overlay row replaces; role fills in
+      // Undo/Redo/Cut/Copy/Paste/Select All with OS-localised labels.
+      role: "editMenu",
     },
     {
       label: "View",
@@ -779,13 +951,31 @@ function createTray() {
 
 // The app owns its own theme (SettingsContext writes data-theme); the native
 // frame, tray and dialogs should follow it instead of being pinned to dark.
-ipcMain.on("desktop:theme", (_event, theme) => {
+// The renderer sends the colours it actually resolved for the current theme
+// (they differ per theme — 16 palettes, not just light/dark), so the caption
+// overlay and the window background match the strip exactly.
+ipcMain.on("desktop:theme", (_event, theme, colors) => {
   const light =
     theme === "light" ||
     (theme !== "dark" && nativeTheme.shouldUseDarkColors === false);
   nativeTheme.themeSource = light ? "light" : "dark";
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.setBackgroundColor(light ? "#ffffff" : "#000000");
+    // Validate before use: this is a renderer-supplied string that reaches a
+    // native call, and a malformed colour would throw inside Chromium.
+    const bg = /^#[0-9a-fA-F]{6}$/.test(colors?.background) ? colors.background : null;
+    const fg = /^#[0-9a-fA-F]{6}$/.test(colors?.foreground) ? colors.foreground : null;
+    mainWindow.setBackgroundColor(bg || (light ? "#ffffff" : "#000000"));
+    // The in-window strip paints with var(--background), so the caption
+    // overlay has to follow it or the top of the window splits in two.
+    mainWindow.setTitleBarOverlay({
+      color: bg || (light ? "#ffffff" : "#050505"),
+      symbolColor: fg || (light ? "#1a1a1a" : "#e3e3e3"),
+      height: 36,
+    });
+    // Logged so the caption colours can be asserted without a native probe.
+    bootLog(
+      `[theme] mode=${light ? "light" : "dark"} bg=${bg || "-"} fg=${fg || "-"}`
+    );
   }
 });
 
@@ -834,7 +1024,16 @@ async function boot() {
 
   // Same window: swap the splash document for the app. Destroying and
   // rebuilding made the taskbar entry blink out and back.
-  await mainWindow.loadURL(APP_ORIGIN);
+  //
+  // loadURL can reject with ERR_FAILED even when the app did load (a renderer
+  // reload or an early redirect supersedes the pending load). Booting is not
+  // allowed to die on that, so treat a rejection as non-fatal — the
+  // did-finish-load handler below does the parts that must happen.
+  try {
+    await mainWindow.loadURL(APP_ORIGIN);
+  } catch (error) {
+    bootLog(`[boot] loadURL reported ${error?.message || error} — continuing if the page lands`);
+  }
   isBooting = false;
   bootLog(`[boot] ready — opening main window #${mainWindow.id} (windows=${BrowserWindow.getAllWindows().length})`);
   wireSelfUpdate();

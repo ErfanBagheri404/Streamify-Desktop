@@ -60,6 +60,20 @@ if (existsSync(envFile)) {
   console.log("no app/.env.local (server-side routes will run without secrets)");
 }
 
+// `instrumentation.ts` loads undici through a dynamic `import("undici")`, which
+// Next's file tracer does not follow — undici is therefore missing from
+// standalone/node_modules and the packaged server would fail to install the
+// proxy dispatcher at runtime. undici has zero dependencies, so a plain copy
+// is the whole job.
+const undiciSrc = path.join(root, "app", "node_modules", "undici");
+if (existsSync(undiciSrc)) {
+  const undiciDest = path.join(standalone, "node_modules", "undici");
+  cpSync(undiciSrc, undiciDest, { recursive: true });
+  console.log(`copied app/node_modules/undici -> standalone/node_modules/undici`);
+} else {
+  console.log("no app/node_modules/undici — proxy dispatcher unavailable at runtime");
+}
+
 const dirSize = (p) => {
   if (!statSync(p).isDirectory()) return statSync(p).size;
   return readdirSync(p).reduce((n, f) => n + dirSize(path.join(p, f)), 0);

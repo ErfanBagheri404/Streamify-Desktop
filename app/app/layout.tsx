@@ -152,6 +152,15 @@ export default function RootLayout({
               "try{var s=localStorage.getItem('streamifyAppSettings'),o=s?JSON.parse(s):null;document.documentElement.dataset.communityBanner=o&&o.showCommunityBanner===false?'off':'on'}catch(e){}",
           }}
         />
+        {/* Desktop shell: the in-window title strip is drawn over the content
+            (globals.css reads this height), so the inset must exist before the
+            first paint or the content visibly jumps under it. */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html:
+              "try{if(window.streamifyDesktop)document.documentElement.dataset.overlayTitleBar='on'}catch(e){}",
+          }}
+        />
         <AppShell>{children}</AppShell>
       </body>
     </html>

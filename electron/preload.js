@@ -12,7 +12,9 @@ contextBridge.exposeInMainWorld("streamifyDesktop", {
   platform: process.platform,
   isDesktop: true,
   version: ipcRenderer.sendSync("desktop:app-info").version,
-  setTheme: (theme) => ipcRenderer.send("desktop:theme", theme),
+  // colors: { background, foreground } resolved by the renderer, so the
+  // caption overlay matches the app palette (16 themes, not just light/dark).
+  setTheme: (theme, colors) => ipcRenderer.send("desktop:theme", theme, colors),
   onCommand: (callback) => {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on("desktop:command", listener);
@@ -42,6 +44,12 @@ contextBridge.exposeInMainWorld("streamifyDesktop", {
   // Browser-mediated sign-in. Main owns the PKCE verifier + the deep link, so
   // no auth secret is ever exposed to the renderer. The renderer only receives
   // the already-verified token hash and hands it to Supabase.
+  // In-window overlay row: dots menu + back/forward chevrons. The native
+  // title bar and the old menu bar row are both hidden, so this is now the
+  // only way to reach the application menu without a keyboard.
+  titleBar: {
+    openMenu: () => ipcRenderer.send("desktop:menu-popup"),
+  },
   auth: {
     start: () => ipcRenderer.sendSync("desktop:auth-start"),
     // Claim a redeem result the push missed (listener not attached yet).
@@ -56,5 +64,13 @@ contextBridge.exposeInMainWorld("streamifyDesktop", {
       ipcRenderer.on("desktop:auth-error", listener);
       return () => ipcRenderer.removeListener("desktop:auth-error", listener);
     },
+  },
+  // Proxy: main owns the setting (it decides how the Next child reaches the
+  // network); the renderer just mirrors it for the UI.
+  proxy: {
+    get: () => ipcRenderer.invoke("desktop:proxy-get"),
+    // Returns the saved config plus restartRequired — the server reads its
+    // proxy env once at startup, so a change only fully applies on next launch.
+    set: (config) => ipcRenderer.invoke("desktop:proxy-set", config),
   },
 });

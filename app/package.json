@@ -19,7 +19,8 @@
     "react-audio-visualize": "^1.2.0",
     "react-dom": "19.2.4",
     "shaka-player": "^5.1.7",
-    "ts-api-utils": "^2.4.0"
+    "ts-api-utils": "^2.4.0",
+    "undici": "^6.29.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
