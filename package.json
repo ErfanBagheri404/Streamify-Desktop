@@ -1,6 +1,6 @@
 {
   "name": "streamify-desktop",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "description": "Streamify Desktop - native music player for Windows, macOS and Linux",
   "main": "electron/main.js",
