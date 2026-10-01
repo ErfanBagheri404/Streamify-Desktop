@@ -109,8 +109,23 @@ console.log("--- nav chevrons stay inside the app ---");
 // Start from a fresh origin so earlier navigations (this script, or a verifier
 // that ran before it) cannot leave a forward entry that makes the back/forward
 // assertions below meaningless.
+const waitForLoad = async (timeoutMs = 30000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 400));
+    try {
+      if ((await evalJs("document.readyState")) === "complete") return true;
+    } catch {
+      // context swapped mid-flight; keep polling
+    }
+  }
+  return false;
+};
 await evalJs(`location.assign("/")`).catch(() => {});
-await new Promise((r) => setTimeout(r, 2500));
+// Wait for the document to finish loading rather than sleeping: assigning
+// again mid-load cancels it and the destination never happens to arrive.
+await waitForLoad();
+await new Promise((r) => setTimeout(r, 2000));
 // Navigate via a real load, then poll for the destination with fresh
 // evaluates: a pending Runtime.evaluate is dropped when the context is
 // destroyed by navigation, which would hang the whole script.

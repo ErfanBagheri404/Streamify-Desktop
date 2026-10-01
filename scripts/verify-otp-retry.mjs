@@ -35,6 +35,20 @@ check("403 is NOT retryable", !isRetryableAuthFetchError({ status: 403, name: "A
 check("otp_expired is NOT retryable", !isRetryableAuthFetchError({ status: 403, name: "AuthApiError", message: "Email link is invalid or has expired" }));
 check("null is NOT retryable", !isRetryableAuthFetchError(null));
 
+// The case actually seen in the field: Chromium's fetch rejects with a bare
+// TypeError("Failed to fetch") that supabase-js passed through untouched, so a
+// classifier matching only AuthRetryableFetchError would never retry it.
+check("bare TypeError('Failed to fetch') is retryable", isRetryableAuthFetchError(new TypeError("Failed to fetch")));
+check(
+  "plain object {message:'Failed to fetch'} is retryable",
+  isRetryableAuthFetchError({ message: "Failed to fetch" })
+);
+check(
+  "'NetworkError when attempting to fetch' is retryable (Chromium wording)",
+  isRetryableAuthFetchError(new TypeError("NetworkError when attempting to fetch resource."))
+);
+check("an unrelated TypeError is NOT retryable", !isRetryableAuthFetchError(new TypeError("x is not a function")));
+
 // --- retry behaviour ----------------------------------------------------------
 // Real error object (supabase-js returns, never throws, for transport failures).
 {

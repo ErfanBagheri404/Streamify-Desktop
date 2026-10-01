@@ -24,9 +24,14 @@ const RETRYABLE_CODES = new Set([
 export function isRetryableAuthFetchError(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
   const name = (error as { name?: string }).name || "";
+  const message = (error as { message?: string }).message || "";
   const status = (error as { status?: number }).status;
   const causeCode = (error as { cause?: { code?: string } }).cause?.code;
   if (name === "AuthRetryableFetchError") return true;
+  // Chromium's fetch throws TypeError("Failed to fetch") on network failure.
+  // supabase-js may or may not wrap it, so match the message directly.
+  // Chromium also uses "NetworkError when attempting to fetch resource."
+  if (message === "Failed to fetch" || message === "NetworkError when attempting to fetch resource.") return true;
   // A blocked/failed request surfaces as status 0; 5xx is a server blip.
   if (typeof status === "number" && (status === 0 || status >= 500)) return true;
   return Boolean(causeCode && RETRYABLE_CODES.has(causeCode));

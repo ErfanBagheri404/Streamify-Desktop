@@ -598,6 +598,17 @@ function createWindow({ splash = false } = {}) {
     void shell.openExternal(url);
   });
 
+  // Renderer errors never reach stdout, so a failed sign-in used to be
+  // invisible from the outside. Forward console errors (they carry the
+  // supabase-js failure detail) into the app log.
+  mainWindow.webContents.on("console-message", (_event, details) => {
+    const level = typeof details?.level === "string" ? details.level : "";
+    if (level !== "error" && level !== "warning") return;
+    const message = String(details?.message || "").trim();
+    if (!message) return;
+    bootLog(`[renderer:${level}] ${message.slice(0, 300)}`);
+  });
+
   mainWindow.webContents.on("did-finish-load", () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     if (!mainWindow.isVisible()) mainWindow.show();
