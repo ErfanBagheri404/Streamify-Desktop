@@ -113,15 +113,16 @@ const readTheme = `(() => {
   });
 })()`;
 
+// Theme cards are the only aria-pressed buttons with a text label; the settings
+// page also renders toggle switches with aria-pressed, so filter on that.
 const swatches = `(() => {
-  // Theme cards are the only buttons carrying aria-pressed on this page.
-  const all = [...document.querySelectorAll('button[aria-pressed]')];
+  const all = [...document.querySelectorAll('button[aria-pressed]')].filter((b) => b.textContent.trim().length > 0);
   const pressed = all.findIndex((b) => b.getAttribute('aria-pressed') === 'true');
   return JSON.stringify({ count: all.length, pressedIndex: pressed, labels: all.map((b) => b.textContent.trim().slice(0, 16)) });
 })()`;
 
 const pick = (index) => `(async () => {
-  const all = [...document.querySelectorAll('button[aria-pressed]')];
+  const all = [...document.querySelectorAll('button[aria-pressed]')].filter((b) => b.textContent.trim().length > 0);
   const b = all[${index}];
   if (!b) return 'missing';
   b.click();

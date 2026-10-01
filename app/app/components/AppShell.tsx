@@ -5,7 +5,6 @@ import AppBootstrap from "./AppBootstrap";
 import CloudLibraryBridge from "./CloudLibraryBridge";
 import CommunityBanner from "./CommunityBanner";
 import LeftPanel from "./LeftPanel";
-import MobileAppGate from "./MobileAppGate";
 import OverlayTitleBar from "./OverlayTitleBar";
 import PageTitle from "./PageTitle";
 import ShellLayout from "./ShellLayout";
@@ -41,7 +40,6 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           <PageTitle />
           <SidePanelProvider>
             <CloudLibraryBridge />
-            <MobileAppGate />
             <CommunityBanner />
             <LeftPanel />
             <ShellLayout>{children}</ShellLayout>

@@ -503,13 +503,6 @@
   "session.joinStep2Desc": "Paste the session ID into the input field and press Join.",
   "session.joinStep3Title": "Control together",
   "session.joinStep3Desc": "Everyone in the session can search, queue, and control playback in real-time.",
-  "mobileGate.badge": "Latest Release",
-  "mobileGate.title": "Streamify for Android",
-  "mobileGate.description": "The latest version is available now. Download it from the GitHub releases page.",
-  "mobileGate.repoLabel": "Android app repository",
-  "mobileGate.downloadButton": "View Latest Release",
-  "mobileGate.enterButton": "Continue in Browser",
-  "mobileGate.footer": "You can still use the web app in your browser if you prefer.",
   "update.availableTitle": "Update available",
   "update.availableDescription": "Streamify Desktop {version} is ready to download. You are on {current}.",
   "update.releaseNotes": "What's new",
@@ -540,5 +533,5 @@
   "settings.proxyOff": "Off",
   "settings.proxyUrlPlaceholder": "http://127.0.0.1:10808",
   "settings.proxyApply": "Apply",
-  "settings.proxyRestartRequired": "Proxy saved. Restart Streamify so background requests use it too." 
+  "settings.proxyRestartRequired": "Proxy saved. Restart Streamify so background requests use it too."
 }

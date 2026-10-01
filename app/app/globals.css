@@ -1181,3 +1181,12 @@ html[data-overlay-title-bar="on"] body:has(main[data-auth-page="true"]) {
   padding-top: var(--overlay-title-bar-height) !important;
 }
 
+/* The auth screen sizes itself to 100dvh, but it also sits below the strip's
+   inset, so together they exceed the viewport by the strip height and the
+   window scrolls on a screen that should be full-bleed. Shrink the screen by
+   exactly the inset instead. */
+html[data-overlay-title-bar="on"] main[data-auth-page="true"] > div {
+  height: calc(100dvh - var(--overlay-title-bar-height)) !important;
+  min-height: 0;
+}
+

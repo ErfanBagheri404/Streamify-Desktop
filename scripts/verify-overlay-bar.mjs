@@ -106,6 +106,11 @@ check("current entry is an app URL", s.href.startsWith("http://localhost:3000"),
 console.log("   shot " + (await shot("overlay-bar.png")));
 
 console.log("--- nav chevrons stay inside the app ---");
+// Start from a fresh origin so earlier navigations (this script, or a verifier
+// that ran before it) cannot leave a forward entry that makes the back/forward
+// assertions below meaningless.
+await evalJs(`location.assign("/")`).catch(() => {});
+await new Promise((r) => setTimeout(r, 2500));
 // Navigate via a real load, then poll for the destination with fresh
 // evaluates: a pending Runtime.evaluate is dropped when the context is
 // destroyed by navigation, which would hang the whole script.

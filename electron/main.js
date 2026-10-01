@@ -169,6 +169,11 @@ function persistBounds() {
 // renderer and the server always agree.
 const PROXY_MODES = ["system", "manual", "off"];
 
+// Height of the OS caption-button box. Deliberately 4px shorter than the
+// in-window strip (MENU_BAR_HEIGHT = 36) so the strip's bottom divider stays
+// visible underneath the buttons instead of running into them.
+const CAPTION_BUTTON_HEIGHT = 32;
+
 function proxyFile() {
   return path.join(app.getPath("userData"), "proxy.json");
 }
@@ -550,7 +555,11 @@ function createWindow({ splash = false } = {}) {
     // overlay colour is re-painted on theme change (see applyTheme) to match
     // the in-window strip, otherwise the two read as different materials.
     titleBarStyle: "hidden",
-    titleBarOverlay: { color: "#050505", symbolColor: "#e3e3e3", height: 36 },
+    // The OS draws its caption buttons inside a box of exactly this height, and
+    // the strip's divider sits on its last row — at 36px the buttons would end
+    // flush with the border and look like they were painted over it. 4px short
+    // of the 36px strip (MENU_BAR_HEIGHT) leaves the divider clear underneath.
+    titleBarOverlay: { color: "#050505", symbolColor: "#e3e3e3", height: CAPTION_BUTTON_HEIGHT },
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -970,7 +979,7 @@ ipcMain.on("desktop:theme", (_event, theme, colors) => {
     mainWindow.setTitleBarOverlay({
       color: bg || (light ? "#ffffff" : "#050505"),
       symbolColor: fg || (light ? "#1a1a1a" : "#e3e3e3"),
-      height: 36,
+      height: CAPTION_BUTTON_HEIGHT,
     });
     // Logged so the caption colours can be asserted without a native probe.
     bootLog(

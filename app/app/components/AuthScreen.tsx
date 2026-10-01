@@ -7,6 +7,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useAppLanguage } from "../hooks/useAppLanguage";
 import { getSupabaseBrowserClient } from "../lib/supabase/browser";
 import { getBaseUrl } from "../lib/supabase/config";
+import { verifyOtpWithRetry } from "../lib/auth/verify-otp-retry";
 
 type AuthMode = "signin" | "signup" | "forgot-password" | "reset-password";
 
@@ -183,9 +184,14 @@ export default function AuthScreen({ mode }: AuthScreenProps) {
       setErrorMessage(authUnavailableMessage);
       return Promise.resolve();
     }
-    return supabase.auth
-      .verifyOtp({ token_hash: result.token_hash, type: "magiclink" })
-      .then(({ error }) => {
+    // The Supabase host resolves unreliably on some networks: main's log shows
+    // ENOTFOUND and UND_ERR_CONNECT_TIMEOUT for it, and supabase-js reports that
+    // as AuthRetryableFetchError("Failed to fetch") — the sign-in then looks
+    // finished on the web while this app claims it could not store the session.
+    // The grant is single-use, so only the fetch is retried, never the grant.
+    return verifyOtpWithRetry(() =>
+      supabase.auth.verifyOtp({ token_hash: result.token_hash, type: "magiclink" })
+    ).then(({ error }) => {
         if (error) {
           setErrorMessage(
             `Sign-in finished in the browser, but this app could not store the session: ${error.message}`
