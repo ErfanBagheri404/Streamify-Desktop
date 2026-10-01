@@ -9,10 +9,9 @@
 //
 // Kept free of imports on purpose so it can be unit-checked directly.
 //
-// ponytail: fixed backoff up to ~1.6s / 4 attempts. Add jitter and a telemetry
-// hook only if real failures outlast that window.
-
-const RETRY_DELAYS_MS = [0, 400, 900, 1600];
+// ponytail: fixed backoff up to ~8s / 6 attempts, no jitter. Add jitter and a
+// telemetry hook only if real failures outlast that window.
+const RETRY_DELAYS_MS = [0, 500, 1000, 2000, 3500, 5500];
 const RETRYABLE_CODES = new Set([
   "EAI_AGAIN",
   "ENOTFOUND",
