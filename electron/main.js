@@ -45,6 +45,7 @@ const ROOT = app.isPackaged ? process.resourcesPath : path.join(__dirname, "..")
 
 let mainWindow = null;
 let nextProc = null;
+let proxyRestartInFlight = false;
 let apiServer = null;
 let tray = null;
 let isQuitting = false;
@@ -457,12 +458,21 @@ async function resolveProxyUrl() {
 
   if (!mainWindow || mainWindow.isDestroyed()) return null;
   try {
-    // "direct://" means no proxy — don't pass that to undici.
+    // Probe a host that is NOT in PROXY_BYPASS_HOSTS. Asking about Supabase
+    // always answered "direct://" (it is bypassed on purpose), so system mode
+    // silently handed the Next child no proxy at all — and every
+    // SoundCloud/YouTube fetch then failed with "Failed to fetch". Probe a
+    // host we actually want proxied.
     const resolved = await mainWindow.webContents.session.resolveProxy(
-      "https://hrlmsfsifdtvndrgpxth.supabase.co"
+      "https://api-v2.soundcloud.com"
     );
     const match = /^(PROXY|SOCKS5?|HTTPS?)\s+(\S+)/i.exec(resolved || "");
-    if (!match) return null;
+    if (!match) {
+      // Worth saying out loud: system mode + OS proxy disabled = direct, and
+      // direct cannot reach SoundCloud from this region.
+      bootLog(`[proxy] system mode resolved '${resolved || "empty"}' -> direct (no proxy)`);
+      return null;
+    }
     const host = match[2];
     const scheme = /^socks/i.test(match[1]) ? "socks5" : "http";
     const url = `${scheme}://${host}`;
@@ -473,6 +483,11 @@ async function resolveProxyUrl() {
     return null;
   }
 }
+
+// Resolved once at boot (after the window exists so resolveProxy works) and
+// shared: the Next child gets it as env, the in-process API installs it as a
+// dispatcher, and it is re-read after relaunch.
+let bootProxyUrl = null;
 
 async function startNext() {
   const appDir = path.join(ROOT, "app");
@@ -512,7 +527,7 @@ async function startNext() {
   // explicitly. instrumentation.ts turns that into a global proxy dispatcher.
   // Without this the Supabase auth handoff fails with ENOTFOUND/Failed to
   // fetch whenever a system proxy is set or local DNS is unreliable.
-  const proxyUrl = await resolveProxyUrl();
+  const proxyUrl = bootProxyUrl;
 
   nextProc = spawn(process.execPath, args, {
     cwd: isStandalone ? standaloneDir : appDir,
@@ -750,13 +765,28 @@ ipcMain.handle("desktop:proxy-set", (_event, next) => {
   }
 
   // The Next child read the proxy env once at startup (instrumentation.ts), so
-  // a change only reaches the server on the next launch. Say so instead of
-  // silently leaving sign-in broken.
-  return {
-    ...config,
-    restartRequired:
-      previous.mode !== config.mode || previous.url !== config.url,
-  };
+  // a change has to reach it somehow. Chromium picks the new rule up
+  // immediately; the server needs a fresh child. Relaunch the window (which
+  // restarts Next) instead of only telling the user to restart later — a stale
+  // server is what produced "Failed to fetch" the moment the user flipped to
+  // system proxy.
+  const changed =
+    previous.mode !== config.mode || previous.url !== config.url;
+  if (changed && !proxyRestartInFlight) {
+    proxyRestartInFlight = true;
+    // A full relaunch, not a window reload: the Next child is spawned once
+    // with the proxy env baked in, and instrumentation.ts reads it at startup.
+    // Relaunching is the only way the server actually picks up the new mode.
+    setTimeout(() => {
+      bootLog(`[proxy] relaunching to apply mode=${config.mode}`);
+      // args: dev launches as `electron .` — without passing argv[1..] back the
+      // relaunched dev instance would start with no app path.
+      app.relaunch({ args: process.argv.slice(1) });
+      app.exit(0);
+    }, 400);
+  }
+
+  return { ...config, restartRequired: changed };
 });
 
 // ---- menu + media keys + tray ---------------------------------------------
@@ -1029,8 +1059,30 @@ if (process.env.STREAMIFY_DEBUG_PORT) {
 }
 
 // ---- boot ------------------------------------------------------------------
+// Widevine CDM: this build ships the castlabs Electron fork (Electron for
+// Content Security), which is the only Electron that can decrypt Widevine —
+// stock Electron has no CDM and Shaka fails with 6001. The CDM is fetched
+// from Google on first run and cached under userData; whenReady() resolves
+// once it is registered, so awaiting it here keeps boot non-blocking while
+// guaranteeing the CDM exists before any DRM track can be attempted.
+async function ensureWidevineCdm() {
+  try {
+    const { components } = require("electron");
+    if (!components || typeof components.whenReady !== "function") return false;
+    await components.whenReady();
+    const status = components.status();
+    const widevine = status && status["oimompecagnajdejgnnjijobebaeigek"];
+    bootLog(`[drm] widevine cdm ${widevine ? widevine.version : "unavailable"}`);
+    return Boolean(widevine);
+  } catch (err) {
+    bootLog(`[drm] widevine cdm init failed: ${err && err.message ? err.message : err}`);
+    return false;
+  }
+}
+
 async function boot() {
   await app.whenReady();
+  await ensureWidevineCdm();
   bootLog(`[boot] app-ready dev=${isDev} apiPort=${API_PORT} appPort=${APP_PORT}`);
   nativeTheme.themeSource = "dark";
   registerAuthProtocol();
@@ -1052,6 +1104,16 @@ async function boot() {
   // Never set in a packaged build (kept only as a reminder of the switch name).
 
   const splash = createSplash();
+  // Resolve before starting either server: the child inherits env at spawn
+  // time and the in-process API reads it when startApiServer() runs.
+  bootProxyUrl = await resolveProxyUrl();
+  if (bootProxyUrl) {
+    process.env.HTTPS_PROXY = bootProxyUrl;
+    process.env.HTTP_PROXY = bootProxyUrl;
+  } else {
+    delete process.env.HTTPS_PROXY;
+    delete process.env.HTTP_PROXY;
+  }
   bootLog(`[boot] splash in window #${splash.id} (windows=${BrowserWindow.getAllWindows().length})`);
 
   try {

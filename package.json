@@ -28,6 +28,7 @@
   "build": {
     "appId": "com.streamify.desktop",
     "productName": "Streamify Desktop",
+    "electronDist": "node_modules/electron/dist",
     "copyright": "Copyright © 2026 Streamify",
     "directories": {
       "output": "release",
@@ -155,7 +156,7 @@
   "devDependencies": {
     "concurrently": "^9.2.1",
     "cross-env": "^10.1.0",
-    "electron": "^35.2.2",
+    "electron": "https://github.com/castlabs/electron-releases#v36.4.0+wvcus",
     "electron-builder": "^26.1.0",
     "esbuild": "^0.25.0",
     "wait-on": "^8.0.5"

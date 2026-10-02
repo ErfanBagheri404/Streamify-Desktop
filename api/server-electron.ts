@@ -7,6 +7,7 @@ import worker from "./src/index.js";
 // Origin: http://localhost:3000). Bundled by esbuild; kills the cold-boot delay
 // from fetching remote config. Remote deployments can still refresh via CONFIG_URL.
 import runtimeConfig from "./runtime-config.json";
+import { installProxyFromEnv } from "./proxy-setup";
 
 export type RunningApiServer = { port: number; close: () => Promise<void> };
 
@@ -72,6 +73,8 @@ function toHeaders(headersObject: http.IncomingHttpHeaders): Headers {
 export async function startApiServer(
   preferredPort = Number(process.env.STREAMIFY_API_PORT || 7861)
 ): Promise<RunningApiServer> {
+  // No-op when no proxy env is set. Must run before the first upstream fetch.
+  await installProxyFromEnv();
   const server = http.createServer(async (req, res) => {
     try {
       // Local-only endpoint: the app fetches provider endpoints from here so it
