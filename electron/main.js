@@ -214,6 +214,26 @@ function proxyRulesFor(config) {
   return "system://";
 }
 
+// Hosts that must NOT go through the proxy. Measured on this network: the local
+// proxy (xray) reaches YouTube but cannot reach Supabase at all (20s timeout),
+// while Supabase answers directly in ~0.4s. Routing everything through the
+// proxy therefore broke sign-in even though covers worked.
+const PROXY_BYPASS_HOSTS = [
+  "hrlmsfsifdtvndrgpxth.supabase.co",
+  "supabase.co",
+  "supabase.in",
+  "supabase.com",
+  "streamify-player.vercel.app",
+  "vercel.app",
+  "localhost",
+  "127.0.0.1",
+  "[::1]",
+];
+
+function proxyBypassRules() {
+  return PROXY_BYPASS_HOSTS.map((h) => `*${h}*`).join(",");
+}
+
 // ---- desktop auth handoff (browser-mediated device grant) ------------------
 // The desktop never collects credentials. beginDesktopAuth() creates a PKCE
 // challenge + nonce, opens the webplayer confirm page in the OS browser, and
@@ -576,10 +596,12 @@ function createWindow({ splash = false } = {}) {
     mainWindow.webContents.session.setProxy({
       proxyRules: rules,
       // localhost is the app itself and the in-process API; proxying it would
-      // loop the renderer's own requests back through the proxy.
-      proxyBypassRules: "localhost,127.0.0.1,[::1]",
+      // loop the renderer's own requests back through the proxy. Auth hosts
+      // bypass too: measured, the local proxy cannot reach Supabase (20s
+      // timeout) while direct answers in ~0.4s.
+      proxyBypassRules: proxyBypassRules(),
     });
-    bootLog(`[proxy] renderer rules=${rules}`);
+    bootLog(`[proxy] renderer rules=${rules} bypass=${proxyBypassRules()}`);
   } catch (error) {
     bootLog(`[proxy] setProxy failed: ${error?.message || error}`);
   }

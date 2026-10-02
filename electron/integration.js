@@ -7,6 +7,7 @@
 // Nothing re-implements playback.
 const { app, Notification, nativeImage } = require("electron");
 const http = require("http");
+const https = require("https");
 
 // notification -> tray -> menu all speak the same command vocabulary.
 const COMMANDS = new Set(["play-pause", "next", "previous"]);
@@ -42,7 +43,11 @@ const ARTWORK_CACHE_LIMIT = 8;
 function fetchArtwork(url) {
   return new Promise((resolve) => {
     if (!url || !/^https?:\/\//i.test(url)) return resolve(null);
-    const request = http.get(
+    // http.get throws ERR_INVALID_PROTOCOL on https: URLs, so dispatch on the
+    // scheme. A missed cover must never crash the app — hence the resolve(null)
+    // handlers on every failure path.
+    const transport = /^https:\/\//i.test(url) ? https : http;
+    const request = transport.get(
       url,
       { timeout: 8000, headers: { "User-Agent": "Streamify-Desktop" } },
       (response) => {

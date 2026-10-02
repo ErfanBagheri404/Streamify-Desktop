@@ -36,6 +36,13 @@ export async function register() {
     // the local Next server, and routing that through an external proxy would
     // send the app's own traffic out of the machine.
     process.env.NO_PROXY = process.env.NO_PROXY || "localhost,127.0.0.1,::1";
+    // Measured: the local proxy reaches YouTube but cannot reach Supabase at all
+    // (20s timeout), while Supabase answers directly in ~0.4s. Routing auth
+    // through it therefore broke sign-in. Keep auth hosts direct.
+    const directHosts = "supabase.co,supabase.in,supabase.com,vercel.app,*.supabase.co";
+    if (!/(^|,).?\s*supabase\.co\b/.test(process.env.NO_PROXY)) {
+      process.env.NO_PROXY = `${process.env.NO_PROXY},${directHosts}`;
+    }
     process.env.no_proxy = process.env.NO_PROXY;
     undici.setGlobalDispatcher(new undici.EnvHttpProxyAgent());
     // Point the builtin global at undici's proxy-aware fetch (see note 1).
