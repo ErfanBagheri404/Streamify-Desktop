@@ -20,7 +20,7 @@ const {
 const path = require("path");
 const fs = require("fs");
 const http = require("http");
-const { spawn } = require("child_process");
+const { spawn, execFileSync } = require("child_process");
 const { pathToFileURL } = require("url");
 
 const isProd = app.isPackaged || process.env.NODE_ENV === "production";
@@ -130,7 +130,12 @@ function bootLog(line) {
   const stamp = new Date().toISOString();
   process.stdout.write(`${stamp} ${line}\n`);
   try {
-    const dir = path.join(ROOT, ".logs");
+    // Packaged: ROOT is `process.resourcesPath` (Program Files), which is not
+    // writable without elevation — every log line was silently dropped, so an
+    // installed build could not be diagnosed at all. userData always is.
+    const dir = app.isPackaged
+      ? path.join(app.getPath("userData"), ".logs")
+      : path.join(ROOT, ".logs");
     fs.mkdirSync(dir, { recursive: true });
     fs.appendFileSync(path.join(dir, "app.log"), `${stamp} ${line}\n`);
   } catch {}
@@ -206,13 +211,22 @@ function normalizeProxyUrl(value) {
 
 // "off" must bypass the system settings too, so it maps to "direct://" rather
 // than "system://" — Chromium's proxy rules treat direct:// as always-direct.
+//
+// "system" is NOT passed through as "system://": Chromium caches the WinINET
+// config at first use, so flipping the OS proxy on after the browser started
+// (v2rayN does exactly that) leaves the renderer on "empty" while the registry
+// holds a live proxy. The renderer then fails to reach SoundCloud media while
+// the servers (which use the registry fallback in resolveProxyUrl) succeed —
+// a split that looks like a DRM failure but is purely proxy plumbing. Resolve
+// the concrete URL here so renderer and servers agree.
 function proxyRulesFor(config) {
   if (config.mode === "off") return "direct://";
   if (config.mode === "manual") {
     const url = normalizeProxyUrl(config.url);
     return url ? url : "direct://";
   }
-  return "system://";
+  const fromRegistry = winInetProxy();
+  return fromRegistry || "system://";
 }
 
 // Hosts that must NOT go through the proxy. Measured on this network: the local
@@ -443,6 +457,34 @@ async function startApi() {
 // over as env. instrumentation.ts turns that into a global proxy dispatcher.
 // Without this the Supabase auth handoff fails with ENOTFOUND / Failed to
 // fetch whenever a system proxy is set or local DNS is unreliable.
+// Windows-only: read the WinINET "system proxy" the user actually set.
+// Returns null when disabled, unset, or on another platform.
+function winInetProxy() {
+  if (process.platform !== "win32") return null;
+  try {
+    const raw = execFileSync(
+      "reg",
+      [
+        "query",
+        "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+      ],
+      { encoding: "utf8", windowsHide: true, timeout: 5000 },
+    );
+    const enabled = /ProxyEnable\s+REG_DWORD\s+0x1/i.test(raw);
+    if (!enabled) return null;
+    const server = /ProxyServer\s+REG_SZ\s+(.+)/i.exec(raw);
+    if (!server) return null;
+    // "host:port", or "http=…;https=…" / per-protocol form.
+    const value = server[1].trim();
+    const perProtocol = /(?:^|;)(?:https?)=([^;]+)/i.exec(value);
+    const hostPort = (perProtocol ? perProtocol[1] : value).split(";")[0].trim();
+    if (!hostPort || hostPort.includes("=")) return null;
+    return normalizeProxyUrl(hostPort);
+  } catch {
+    return null;
+  }
+}
+
 async function resolveProxyUrl() {
   const config = readProxyConfig();
 
@@ -468,15 +510,24 @@ async function resolveProxyUrl() {
     );
     const match = /^(PROXY|SOCKS5?|HTTPS?)\s+(\S+)/i.exec(resolved || "");
     if (!match) {
-      // Worth saying out loud: system mode + OS proxy disabled = direct, and
-      // direct cannot reach SoundCloud from this region.
+      // Chromium caches the WinINET config, so flipping the OS proxy after
+      // Chromium started (v2rayN does exactly that) can leave it reporting
+      // "empty" while the registry clearly holds a live proxy. Ask the
+      // registry directly before giving up — otherwise the renderer works
+      // (it re-reads on navigation) but the servers go direct and every
+      // upstream fetch dies with "Failed to fetch".
+      const fromRegistry = winInetProxy();
+      if (fromRegistry) {
+        bootLog(`[proxy] system mode resolve '${resolved || "empty"}' -> registry fallback ${fromRegistry}`);
+        return fromRegistry;
+      }
       bootLog(`[proxy] system mode resolved '${resolved || "empty"}' -> direct (no proxy)`);
       return null;
     }
     const host = match[2];
     const scheme = /^socks/i.test(match[1]) ? "socks5" : "http";
     const url = `${scheme}://${host}`;
-    bootLog(`[proxy] system proxy for supabase -> ${url}`);
+    bootLog(`[proxy] system mode -> ${url}`);
     return url;
   } catch (error) {
     bootLog(`[proxy] resolveProxy failed: ${error?.message || error}`);
