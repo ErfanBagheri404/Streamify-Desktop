@@ -415,7 +415,19 @@ export async function getProviderEndpoints(options?: {
   revalidate?: boolean;
 }): Promise<ProviderEndpoints> {
   if (!providerEndpointsPromise || options?.revalidate) {
+    // The config host is unreachable from some regions and hangs instead of
+    // failing fast; without a timeout every provider lookup waits on it.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
     providerEndpointsPromise = fetch(PROVIDER_ENDPOINTS_URL, {
+      signal: controller.signal,
+      // The config worker rejects requests without an allowlisted Origin
+      // header ("Forbidden origin"); server-side fetch sends none by default.
+      headers: {
+        origin:
+          process.env.NEXT_PUBLIC_SITE_URL ||
+          "https://streamify-player.vercel.app",
+      },
       cache: options?.revalidate ? "no-store" : "default",
     })
       .then(async (response) => {
@@ -426,10 +438,12 @@ export async function getProviderEndpoints(options?: {
         }
 
         const payload = normalizeProviderEndpoints(await response.json());
+        clearTimeout(timer);
         cachedProviderEndpoints = payload;
         return payload;
       })
       .catch((error) => {
+        clearTimeout(timer);
         providerEndpointsPromise = null;
         throw error;
       });
