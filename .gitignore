@@ -21,3 +21,7 @@ shot.png
 # Throwaway Win32 UI probes for driving the NSIS installer wizard
 scripts/*-installer*.ps1
 scripts/list-installer-windows.ps1
+# SMTC helper build output — built by `npm run build:smtc` (CI: dotnet 8).
+# Only native/smtc/*.cs|csproj|app.manifest are source; the rest is generated.
+native/smtc/bin/
+native/smtc/obj/

@@ -56,6 +56,19 @@ jobs:
       - run: npm run build:app
       - name: Fetch yt-dlp binary (fallback resolver)
         run: node scripts/fetch-ytdlp.mjs
+
+      # Windows SMTC helper (native/smtc). The main process spawns this exe out
+      # of resources/smtc-helper, and it is a Windows-only feature: other
+      # platforms skip both steps. It is NOT committed (see .gitignore) — a
+      # 96MB self-contained publish would bloat the repo, so CI builds it.
+      - uses: actions/setup-dotnet@v4
+        if: matrix.platform == 'win'
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build SMTC helper
+        if: matrix.platform == 'win'
+        run: npm run build:smtc
+
       - run: node scripts/make-icon.mjs
 
       # Plain build on PRs / manual runs — artifacts attached to the workflow run.
