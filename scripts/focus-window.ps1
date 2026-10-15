@@ -1,7 +1,7 @@
 # Bring the Streamify window to the front. The app hides instead of quitting on
 # close, so a minimized/background instance still owns its process but shows
 # nothing until it is restored.
-$target = Get-Process | Where-Object { $_.MainWindowTitle -eq 'Streamify Player' } | Select-Object -First 1
+$target = Get-Process | Where-Object { $_.MainWindowTitle -match 'Streamify' } | Select-Object -First 1
 if (-not $target) { Write-Output 'no window'; exit 1 }
 
 Add-Type -AssemblyName Microsoft.VisualBasic

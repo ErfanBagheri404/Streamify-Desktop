@@ -437,7 +437,7 @@ async function fetchTextWithHeaders(
   return text;
 }
 
-async function getSoundCloudClientId(
+export async function getSoundCloudClientId(
   config: WorkerConfig,
   reset = false
 ): Promise<string> {
@@ -489,7 +489,7 @@ async function getSoundCloudClientId(
           { "User-Agent": USER_AGENT, Referer: `${soundcloud.origin}/` },
           12000
         );
-        const match = script.match(/[{,]client_id:"(\w+)"/);
+        const match = script.match(/client_id["']?\s*[:=]\s*["']([a-zA-Z0-9]{16,64})["']/);
         if (match?.[1]) {
           soundCloudClientId = match[1];
           return soundCloudClientId;
@@ -522,7 +522,7 @@ async function getSoundCloudClientId(
   throw new Error("Failed to resolve SoundCloud client id from runtime config");
 }
 
-async function fetchSoundCloudJson(
+export async function fetchSoundCloudJson(
   config: WorkerConfig,
   url: string
 ): Promise<unknown> {
@@ -662,59 +662,50 @@ async function fetchSoundCloudDetails(
     typeof track.track_authorization === "string"
       ? track.track_authorization
       : null;
-  const { streamPayload } = await fetchSoundCloudStreamPayload(
-    config,
-    transcodings,
-    trackAuthorization
-  );
-  const streamUrl =
-    typeof streamPayload.url === "string" ? streamPayload.url : null;
-  if (!streamUrl) {
-    throw new Error("SoundCloud stream URL lookup failed");
-  }
-
   const widgetTrackUrl =
     typeof track.permalink_url === "string" && track.permalink_url.trim()
       ? track.permalink_url
       : normalizedUrlHint ||
         `${soundcloud.apiBase}/tracks/${encodeURIComponent(String(track.id))}`;
 
-  if (isSoundCloudEncryptedStreamUrl(streamUrl)) {
-    const licenseAuthToken =
-      typeof streamPayload.licenseAuthToken === "string"
-        ? streamPayload.licenseAuthToken
-        : null;
-    if (!licenseAuthToken) {
-      throw new Error(
-        "SoundCloud encrypted stream did not include a licenseAuthToken"
-      );
-    }
+  const widgetPlayback = () => ({
+    id: track.id,
+    title: track.title,
+    author: toRecord(track.user).username,
+    lengthSeconds: Math.floor((toNumber(track.duration) ?? 0) / 1000),
+    thumbnailUrl: track.artwork_url || toRecord(track.user).avatar_url,
+    url: widgetTrackUrl,
+    audioType: "soundcloud-widget",
+    audioUrl: widgetTrackUrl,
+    playbackStrategy: "widget",
+    source: "soundcloud",
+  });
 
-    const rawLicenseUrl = buildSoundCloudWidevineLicenseUrl(
-      soundcloud.licenseBase,
-      licenseAuthToken
+  let streamUrl: string | null;
+  try {
+    const { streamPayload } = await fetchSoundCloudStreamPayload(
+      config,
+      transcodings,
+      trackAuthorization
     );
+    streamUrl = typeof streamPayload.url === "string" ? streamPayload.url : null;
+  } catch {
+    // Stream lookup failed (upstream/proxy hiccup). Fall back to SoundCloud's
+    // own widget player — it resolves the stream itself and handles DRM, so
+    // this is strictly better than failing the whole request.
+    streamUrl = null;
+  }
+  if (!streamUrl) {
+    return widgetPlayback();
+  }
 
-    return {
-      id: track.id,
-      title: track.title,
-      author: toRecord(track.user).username,
-      lengthSeconds: Math.floor((toNumber(track.duration) ?? 0) / 1000),
-      thumbnailUrl: track.artwork_url || toRecord(track.user).avatar_url,
-      url: widgetTrackUrl,
-      audioType: "soundcloud-drm",
-      audioUrl: buildDirectProxyAudioUrl(request, streamUrl),
-      drmLicenseUrl: buildWorkerUrl(request, "/license-proxy", {
-        url: rawLicenseUrl,
-      }),
-      drmScheme: "com.widevine.alpha",
-      drmProvider: "soundcloud",
-      drmHeaders: {
-        "Content-Type": "application/octet-stream",
-      },
-      playbackStrategy: "widget",
-      source: "soundcloud",
-    };
+  if (isSoundCloudEncryptedStreamUrl(streamUrl)) {
+    // Encrypted SoundCloud tracks play through SoundCloud's own widget
+    // player (same as the hosted API / web): the Widevine license endpoint
+    // binds the session to SoundCloud's playback context, and a raw
+    // Shaka<->/license-proxy exchange gets its challenge rejected by the
+    // license server (403) / CDM (system code 89).
+    return widgetPlayback();
   }
 
   return {

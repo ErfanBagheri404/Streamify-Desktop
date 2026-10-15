@@ -4,8 +4,10 @@
   STREAMIFY_SERVER_FETCH_SECRET?: string;
   SERVER_FETCH_SECRET?: string;
   ALLOWED_ORIGINS?: string;
-  WORKER_ENV?: string;
-}
+    WORKER_ENV?: string;
+    /** Origin sent to the config worker; it only answers for known app origins. */
+    STREAMIFY_CONFIG_ORIGIN?: string;
+  }
 
 type WorkerRuntimeConfig = {
   api?: {
@@ -339,6 +341,10 @@ function readConfigErrorText(payload: unknown, fallback: string): string {
 async function fetchRemoteConfig(env: WorkerEnv): Promise<WorkerRuntimeConfig> {
   const configUrl = cleanUrl(env.CONFIG_URL) || DEFAULT_CONFIG_URL;
   const headers = new Headers({ Accept: "application/json" });
+  // The config worker rejects requests without an allowed Origin ("Forbidden
+  // origin"), so pin the app's own dev origin when we know it.
+  const appOrigin = cleanText(env.STREAMIFY_CONFIG_ORIGIN) || "http://localhost:3000";
+  headers.set("Origin", appOrigin);
   const serverSecret = cleanText(
     env.STREAMIFY_SERVER_FETCH_SECRET || env.SERVER_FETCH_SECRET
   );

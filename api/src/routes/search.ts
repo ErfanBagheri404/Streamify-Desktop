@@ -10,6 +10,7 @@ import {
 } from "../http";
 import { searchDeezerCatalog } from "./deezer";
 import { searchItunesCatalog } from "./itunes";
+import { searchSpotifyCatalog } from "./spotify";
 
 type SearchResponse = { items: unknown[]; nextpage?: string | null };
 
@@ -851,7 +852,13 @@ export async function handleSearch(
         result = await searchItunes(q, limitNum, config);
         break;
       case "deezer":
-        result = await searchDeezer(q, limitNum, config);
+        result = await searchDeezerCatalog(q, limitNum, config);
+        break;
+      case "spotify":
+        result = {
+          items: await searchSpotifyCatalog(q, limitNum, filterParam, config),
+          nextpage: null,
+        };
         break;
       default:
         result = { items: [], nextpage: null };

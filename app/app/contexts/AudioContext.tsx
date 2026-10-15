@@ -202,6 +202,7 @@ interface SoundCloudWidgetController {
   unbind: (eventName: string) => void;
   play: () => void;
   pause: () => void;
+  isPaused: (callback: (paused: boolean) => void) => void;
   seekTo: (milliseconds: number) => void;
   setVolume: (volume: number) => void;
   getPosition: (callback: (milliseconds: number) => void) => void;
@@ -376,7 +377,12 @@ function inferAudioType(audioUrl?: string, audioType?: AudioType): AudioType {
 }
 
 function shouldUseSoundCloudWidget(song?: Song | null): boolean {
-  return false;
+  if (!song) return false;
+  // Only the explicit widget strategy uses SoundCloud's embedded player.
+  // Widevine tracks carry drmLicenseUrl + an HLS manifest and play through
+  // Shaka against the app's own /license-proxy — the same path the web app
+  // uses, which serves licenses fine while logged out.
+  return song.playbackStrategy === "widget";
 }
 
 function getSoundCloudWidgetTrackUrl(song: Song): string | null {
@@ -398,11 +404,13 @@ function buildSoundCloudWidgetBootstrapUrl(trackUrl: string): string {
 
   // Match the official embed URL closely so the widget drives playback
   // through SoundCloud's own resolve/media/license request chain.
+  // auto_play MUST be true here: it is what makes the widget fetch /media/…
+  // and run the license handshake on load. With false the widget resolves the
+  // track and then idles — no /media request, bar stuck at 00:00.
   const params = new URLSearchParams({
     url: trackUrl,
     auto_play: "true",
     show_artwork: "false",
-    callback: "true",
   });
   return `${soundCloudRuntimeConfig.widgetBase}/player/?${params.toString()}`;
 }
@@ -784,6 +792,7 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
   const lastMediaSessionPositionUpdateRef = useRef(0);
   const lastPersistedSongIdRef = useRef<string | null>(null);
   const lastPersistedProgressRef = useRef(0);
+  const lastPersistedQueueKeyRef = useRef("");
   const hlsControllerRef = useRef<{ destroy: () => void } | null>(null);
   const hlsSourceRef = useRef<string | null>(null);
   const shakaPlayerRef = useRef<{
@@ -1438,9 +1447,32 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
               : state.isRepeat
                 ? "one"
                 : "off";
+          // Restore the whole queue, not just the current song. Rebuilding a
+          // one-song queue on boot made the track look like it was never in
+          // the playlist it was played from — next/previous and the queue
+          // panel all lost the list.
+          const savedQueue = Array.isArray(state.playbackQueue)
+            ? state.playbackQueue.map((entry) => normalizeSong(entry as Song))
+            : [];
+          const queueContainsCurrent = savedQueue.some(
+            (entry) => entry.id === hydratedSong.id,
+          );
+          const restoredQueue = queueContainsCurrent
+            ? savedQueue
+            : [hydratedSong, ...savedQueue];
           setCurrentSong(hydratedSong);
-          setPlaybackQueue([hydratedSong]);
-          setQueueIndex(0);
+          setPlaybackQueue(restoredQueue);
+          const savedIndex =
+            typeof state.queueIndex === "number" ? state.queueIndex : -1;
+          const restoredIndex = Math.max(
+            0,
+            restoredQueue.findIndex((entry) => entry.id === hydratedSong.id),
+          );
+          setQueueIndex(
+            savedIndex >= 0 && savedIndex < restoredQueue.length
+              ? savedIndex
+              : restoredIndex,
+          );
           setCurrentTime(state.currentTime || 0);
           setDuration(state.duration || 0);
           setVolumeState(
@@ -1487,14 +1519,23 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
     const shouldPersistProgress =
       !isPlaying ||
       Math.abs(currentTime - lastPersistedProgressRef.current) >= 15;
+    // A queue edit while paused (reorder, add, remove) changes neither the song
+    // nor the progress, so without this the restored playlist would be stale.
+    const queueKey = `${playbackQueue.length}:${queueIndex}:${playbackQueue[queueIndex]?.id ?? ""}`;
+    const hasQueueChanged = queueKey !== lastPersistedQueueKeyRef.current;
 
-    if (!hasSongChanged && !shouldPersistProgress) {
+    if (!hasSongChanged && !shouldPersistProgress && !hasQueueChanged) {
       return;
     }
 
     const state = {
       currentSong,
       recentSongs,
+      // Persist the queue so a restart keeps the playlist context. Capped
+      // because entries carry full audio URLs and localStorage tops out near
+      // 5MB — a 500-track playlist would blow it and lose the state entirely.
+      playbackQueue: playbackQueue.slice(0, 300),
+      queueIndex,
       currentTime,
       duration,
       volume,
@@ -1508,6 +1549,7 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
     localStorage.setItem("audioPlayerState", JSON.stringify(state));
     lastPersistedSongIdRef.current = currentSong?.id || null;
     lastPersistedProgressRef.current = currentTime;
+    lastPersistedQueueKeyRef.current = queueKey;
   }, [
     currentSong,
     recentSongs,
@@ -1517,6 +1559,8 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
     repeatMode,
     isRepeat,
     isPlaying,
+    playbackQueue,
+    queueIndex,
   ]);
 
   useEffect(
@@ -1906,6 +1950,12 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
           if (soundCloudWidgetRepeatReplayTimerRef.current !== null) {
             window.clearTimeout(soundCloudWidgetRepeatReplayTimerRef.current);
           }
+          // 4s, not 350ms: during load isPaused() reads true, so a short timer
+          // fired a second play() while the first license POST was still in
+          // flight. The token is single-use, the second POST got 403, and the
+          // widget fell back to the non-encrypted /stream/hls URL (404) —
+          // playback died at 00:00. By 4s either playback is moving (no retry)
+          // or it genuinely failed (retry is safe).
           soundCloudWidgetRepeatReplayTimerRef.current = window.setTimeout(
             () => {
               soundCloudWidgetRepeatReplayTimerRef.current = null;
@@ -1931,15 +1981,26 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
               );
               // #endregion
               try {
-                widget.play();
+                widget.isPaused((paused: boolean) => {
+                  if (paused) {
+                    try {
+                      widget.play();
+                    } catch (error) {
+                      console.error(
+                        "Error retrying SoundCloud widget playback:",
+                        error,
+                      );
+                    }
+                  }
+                });
               } catch (error) {
                 console.error(
-                  "Error retrying SoundCloud widget playback:",
+                  "Error checking SoundCloud widget pause state:",
                   error,
                 );
               }
             },
-            350,
+            4000,
           );
         } else {
           setIsSongLoading(false);
@@ -2110,9 +2171,11 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
         setPlaybackError(null);
         setIsSongLoading(true);
         widget.load(soundCloudWidgetTrackUrl as string, {
-          auto_play: isPlayingRef.current,
+          // auto_play stays off: the READY handler issues the single play().
+          // Both firing means two license POSTs on one single-use token —
+          // the second gets 403 and the widget falls back to /stream/hls (404).
+          auto_play: false,
           show_artwork: false,
-          callback: true,
         });
         return;
       }
@@ -2630,6 +2693,11 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
               "com.widevine.alpha": {
                 videoRobustness: ["SW_SECURE_CRYPTO"],
                 audioRobustness: ["SW_SECURE_CRYPTO"],
+                // Skip the server-certificate exchange: SoundCloud's license
+                // endpoint 403s the real license challenge when the CDM first
+                // asks for a server cert. An empty cert makes Shaka send the
+                // license request directly.
+                serverCertificate: new Uint8Array(0),
               },
             },
             retryParameters: {
@@ -3472,7 +3540,10 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
       audioUrl: resolvedAudioUrl,
       audioType: inferAudioType(resolvedAudioUrl, resolvedAudioType),
       playbackStrategy:
-        payload.playbackStrategy === "widget" ? "widget" : undefined,
+        payload.playbackStrategy === "widget" ||
+        payload.playbackStrategy === "audio"
+          ? payload.playbackStrategy
+          : song.playbackStrategy,
       drmLicenseUrl:
         typeof payload.drmLicenseUrl === "string"
           ? payload.drmLicenseUrl
@@ -4271,12 +4342,14 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
           artist: currentSong.artist || "Unknown Artist",
           duration: currentSong.duration || 0,
           coverUrl: currentSong.coverUrl,
+          url: currentSong.url,
         }
       : null;
 
     bridge.reportNowPlaying({
       song,
       isPlaying,
+      isLoading: isSongLoading,
       hasNext: queueIndex >= 0 && queueIndex < playbackQueue.length - 1,
       hasPrevious: queueIndex > 0,
       position: audioRef.current?.currentTime || 0,
@@ -4288,6 +4361,7 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
   }, [
     currentSong,
     isPlaying,
+    isSongLoading,
     playbackQueue,
     queueIndex,
     settings.desktopNotifications,

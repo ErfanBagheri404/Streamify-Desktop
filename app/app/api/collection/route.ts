@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { NextRequest, NextResponse } from "next/server";
 import { requireStreamifyRequest } from "../_lib/request-guard";
+import { fetchSpotifyTrackCovers } from "../_lib/spotify-lookup";
 import {
   getInvidiousInstances,
   getPipedInstances,
@@ -308,17 +309,33 @@ async function fetchJioSaavnCollection(
   kind: "playlist" | "album"
 ): Promise<CollectionResponse> {
   const providerEndpoints = await resolveProviderEndpoints();
+  // The renderer passes either the numeric id or a share token. The saavn API
+  // answers `id=` with the NUMERIC id only; share tokens (featured/album links,
+  // whose slug token is NOT the id) resolve through `link=` instead. Both
+  // shapes return the same payload, and `limit` lifts the default 10-song page.
+  const trimmed = id.trim();
+  const numericId =
+    trimmed.match(/\/(\d{6,})\/?(?:[?#]|$)/)?.[1] ||
+    (!trimmed.includes("/") && /^\d+$/.test(trimmed) ? trimmed : "");
+  const params = numericId
+    ? { id: numericId, limit: 500 }
+    : {
+        limit: 500,
+        link: /^https?:\/\//i.test(trimmed)
+          ? trimmed
+          : `https://www.jiosaavn.com/featured/x/${trimmed}`,
+      };
   const endpointCandidates =
     kind === "playlist"
       ? buildProviderUrlCandidates(
           providerEndpoints.providers.jiosaavn.apiBase,
           ["/api/playlists", "/playlists"],
-          { id }
+          params
         )
       : buildProviderUrlCandidates(
           providerEndpoints.providers.jiosaavn.apiBase,
           ["/api/albums", "/albums"],
-          { id }
+          params
         );
 
   const payload = await fetchFirstSuccessfulJsonUrl(endpointCandidates);
@@ -680,7 +697,9 @@ async function fetchSpotifyCollection(
         title: trackTitle,
         subtitle: artist,
         artist,
-        thumbnailUrl: coverArt,
+        // Filled in below: the embed payload carries NO per-track artwork, so
+        // every row would otherwise show the playlist cover.
+        thumbnailUrl: undefined as string | undefined,
         duration:
           durationMs != null && durationMs > 0
             ? Math.round(durationMs / 1000)
@@ -693,6 +712,22 @@ async function fetchSpotifyCollection(
 
   if (!entries.length) {
     throw new Error("Spotify collection returned no playable tracks");
+  }
+
+  // Per-track cover art. The embed HTML has none, so resolve each track's own
+  // album through the keyless partner lookup. Failure is non-fatal — rows
+  // keep the collection cover rather than the whole import failing.
+  try {
+    const covers = await fetchSpotifyTrackCovers(
+      entries.map((entry) => entry.id)
+    );
+    for (const entry of entries) {
+      entry.thumbnailUrl = covers.get(entry.id) || coverArt || undefined;
+    }
+  } catch {
+    for (const entry of entries) {
+      entry.thumbnailUrl = coverArt || undefined;
+    }
   }
 
   return {

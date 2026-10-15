@@ -18,12 +18,16 @@ export interface NowPlayingSong {
   artist: string;
   duration?: number;
   coverUrl?: string;
+  /** Track's own page on its service — Rich Presence button 2 when http(s). */
+  url?: string;
 }
 
 /** Track + playback state pushed to the main process for Now Playing + MPRIS. */
 export interface NowPlayingReport {
   song: NowPlayingSong | null;
   isPlaying: boolean;
+  /** True while the stream is buffering — freezes the Discord progress bar. */
+  isLoading: boolean;
   hasNext: boolean;
   hasPrevious: boolean;
   position: number;

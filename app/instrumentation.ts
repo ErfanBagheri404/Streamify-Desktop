@@ -31,7 +31,8 @@ export async function register() {
   if (!proxy) return;
 
   try {
-    const undici = await import("undici");
+    // Keep the Node-only dispatcher out of the browser webpack graph.
+    const undici = await new Function("return import('undici')")();
     // Never proxy loopback: the renderer and the in-process API both talk to
     // the local Next server, and routing that through an external proxy would
     // send the app's own traffic out of the machine.
