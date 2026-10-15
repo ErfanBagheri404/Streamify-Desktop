@@ -1,6 +1,6 @@
 {
   "name": "streamify-desktop",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "private": true,
   "description": "Streamify Desktop - native music player for Windows, macOS and Linux",
   "main": "electron/main.js",
@@ -30,6 +30,9 @@
     "appId": "com.streamify.desktop",
     "productName": "Streamify Desktop",
     "copyright": "Copyright © 2026 Streamify",
+    "electronDownload": {
+      "mirror": "https://github.com/castlabs/electron-releases/releases/download/"
+    },
     "directories": {
       "output": "release",
       "buildResources": "build",
