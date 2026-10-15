@@ -19,16 +19,25 @@ jobs:
           - os: windows-latest
             platform: win
             targets: --win nsis portable
+            # The castlabs Widevine dist, not electron-builder's download.
+            # Scoped to win/linux on the command line because electronDist is
+            # top-level in the schema and would also hit mac: the runner's
+            # local dist is single-arch, so --universal can't merge x64+arm64
+            # and dies with "same in both x64 and arm64 builds ... not covered
+            # by the x64ArchFiles rule". That silently killed every mac dmg.
+            dist: --config.electronDist=node_modules/electron/dist
           # macOS ARM runner, universal dmg (arm64 + x64) + zip for portable use.
           # macOS needs no signing for a working app (unsigned runs after the
           # right-click > Open one-time gate); ad-hoc via "identity": null.
           - os: macos-latest
             platform: mac
             targets: --mac dmg zip --universal
+            dist: ''
           # Linux: deb installer + AppImage portable.
           - os: ubuntu-latest
             platform: linux
             targets: --linux deb appimage
+            dist: --config.electronDist=node_modules/electron/dist
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -74,14 +83,14 @@ jobs:
       # Plain build on PRs / manual runs — artifacts attached to the workflow run.
       - name: Build ${{ matrix.platform }}
         if: github.event_name != 'push' || github.ref != 'refs/heads/main'
-        run: npx electron-builder ${{ matrix.targets }}
+        run: npx electron-builder ${{ matrix.dist }} ${{ matrix.targets }}
 
       # Every main push ships: --publish always uploads installers + updater
       # metadata (latest.yml / -mac / -linux) to the v<version> release, so the
       # installed app's "Update now" flow always finds the newest build.
       - name: Build + publish ${{ matrix.platform }}
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: npx electron-builder ${{ matrix.targets }} --publish always
+        run: npx electron-builder ${{ matrix.dist }} ${{ matrix.targets }} --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

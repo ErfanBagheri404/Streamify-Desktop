@@ -1,6 +1,6 @@
 {
   "name": "streamify-desktop",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "private": true,
   "description": "Streamify Desktop - native music player for Windows, macOS and Linux",
   "main": "electron/main.js",
@@ -29,7 +29,6 @@
   "build": {
     "appId": "com.streamify.desktop",
     "productName": "Streamify Desktop",
-    "electronDist": "node_modules/electron/dist",
     "copyright": "Copyright © 2026 Streamify",
     "directories": {
       "output": "release",
@@ -81,22 +80,22 @@
       }
     ],
     "win": {
-        "target": [
-          "nsis",
-          "portable"
-        ],
-        "icon": "build/icon.png",
-        "extraResources": [
-          {
-            "from": "native/smtc/bin/Release/net8.0-windows10.0.19041.0/win-x64/publish",
-            "to": "smtc-helper",
-            "filter": [
-              "**/*",
-              "!**/*.pdb"
-            ]
-          }
-        ]
-      },
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "build/icon.png",
+      "extraResources": [
+        {
+          "from": "native/smtc/bin/Release/net8.0-windows10.0.19041.0/win-x64/publish",
+          "to": "smtc-helper",
+          "filter": [
+            "**/*",
+            "!**/*.pdb"
+          ]
+        }
+      ]
+    },
     "nsis": {
       "differentialPackage": false,
       "oneClick": false,
