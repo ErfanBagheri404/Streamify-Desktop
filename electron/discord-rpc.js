@@ -125,12 +125,10 @@ function timestampsFor(state) {
   return durationMs ? { start, end: start + durationMs } : { start };
 }
 
+const { coverUrlFor: resolvePublicCoverUrl } = require("./image-urls");
+
 function coverUrl(song) {
-  const url = song && song.coverUrl;
-  if (!url || !/^https?:\/\//i.test(url)) return null;
-  // Discord takes the URL as the image key; it fetches and caches it itself.
-  // mp: keys are for images uploaded in the dev portal, which we don't have.
-  return url;
+  return resolvePublicCoverUrl(song);
 }
 
 // Buttons: Discord renders at most two, label + URL, and the URL MUST be
