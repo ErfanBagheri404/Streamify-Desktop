@@ -26,15 +26,22 @@ function isLocalHost(hostname) {
   return LOCAL_HOST_RE.test(String(hostname || "").replace(/^\[|\]$/g, ""));
 }
 
-// Mirrors app/app/lib/youtube-thumbnails.ts. Main is plain JS and cannot import
-// the renderer's TS module, so the shape is restated here.
+// Mirrors the shape in app/app/lib/youtube-thumbnails.ts. Main is plain JS and
+// cannot import the renderer's TS module.
+//
+// Always hqdefault, deliberately, rather than the variant in the URL: the
+// renderer's /api/youtube-thumbnail route walks a fallback chain
+// (maxresdefault -> sddefault -> hqdefault -> mqdefault -> default, see
+// buildVariantFallbacks), so a stored `variant=maxresdefault.jpg` only means
+// that is what the API *named*, not that it exists — YouTube only generates
+// maxres for some videos. Handing Discord a variant that 404s fails the asset
+// and puts the application icon straight back. hqdefault is the one YouTube
+// generates for every video, and the card renders the cover at ~160px, so
+// 480x360 is more than enough resolution.
 function youTubeImageUrl(params) {
   const videoId = (params.get("id") || "").trim();
   if (!videoId) return null;
-  const variant = (params.get("variant") || "maxresdefault.jpg").trim();
-  const webp = params.get("webp") === "1";
-  const base = webp ? "https://i.ytimg.com/vi_webp/" : "https://i.ytimg.com/vi/";
-  return `${base}${encodeURIComponent(videoId)}/${encodeURIComponent(variant)}`;
+  return `https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/hqdefault.jpg`;
 }
 
 // Accept only a publicly resolvable http(s) URL.
