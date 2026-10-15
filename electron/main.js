@@ -16,6 +16,7 @@ const {
   ipcMain,
   nativeImage,
   nativeTheme,
+  session,
 } = require("electron");
 const path = require("path");
 const fs = require("fs");
@@ -24,6 +25,11 @@ const { spawn, execFileSync } = require("child_process");
 const { pathToFileURL } = require("url");
 
 const isProd = app.isPackaged || process.env.NODE_ENV === "production";
+// Discord Rich Presence app id — the same Discord application the web player's
+// OAuth uses. Must be set before the integration wires up (below), not inside
+// startApi(), which runs later. An unregistered id is rejected by Discord, so
+// leaving this empty disables presence entirely.
+process.env.STREAMIFY_DISCORD_CLIENT_ID ||= "1532405105104654452";
 const isDev = !isProd;
 // Self-update runs only in the packaged app: dev has no published release to
 // compare against, and electron-updater would just error.
@@ -219,6 +225,14 @@ function normalizeProxyUrl(value) {
 // the servers (which use the registry fallback in resolveProxyUrl) succeed —
 // a split that looks like a DRM failure but is purely proxy plumbing. Resolve
 // the concrete URL here so renderer and servers agree.
+//
+// The mirror-image trap, measured on this machine: when the OS proxy is
+// toggled OFF, the registry keeps the ProxyServer value and only flips
+// ProxyEnable to 0. Chromium's cached config still names the now-dead
+// server, so passing "system://" here makes the renderer keep sending
+// every request into a closed socket ("no internet at all"), while the
+// servers correctly go direct. In that state we must force "direct://"
+// so renderer and servers agree — a disabled system proxy means no proxy.
 function proxyRulesFor(config) {
   if (config.mode === "off") return "direct://";
   if (config.mode === "manual") {
@@ -226,7 +240,7 @@ function proxyRulesFor(config) {
     return url ? url : "direct://";
   }
   const fromRegistry = winInetProxy();
-  return fromRegistry || "system://";
+  return fromRegistry || "direct://";
 }
 
 // Hosts that must NOT go through the proxy. Measured on this network: the local
@@ -500,6 +514,18 @@ async function resolveProxyUrl() {
 
   if (!mainWindow || mainWindow.isDestroyed()) return null;
   try {
+    // The registry is the source of truth for "is the OS proxy actually on".
+    // Chromium's resolveProxy honors its cached WinINET config, which still
+    // names a live server even after the user toggles the OS proxy off (the
+    // ProxyServer value survives; only ProxyEnable flips to 0). Trusting it
+    // alone would hand the servers a dead proxy while the renderer — which
+    // now forces direct:// via proxyRulesFor() — goes direct, a split that
+    // reads as "no internet". So when the registry says disabled, be direct
+    // here too, matching proxyRulesFor().
+    if (!winInetProxy()) {
+      bootLog("[proxy] system mode disabled by OS (ProxyEnable=0) -> direct");
+      return null;
+    }
     // Probe a host that is NOT in PROXY_BYPASS_HOSTS. Asking about Supabase
     // always answered "direct://" (it is bypassed on purpose), so system mode
     // silently handed the Next child no proxy at all — and every
@@ -750,6 +776,19 @@ function createWindow({ splash = false } = {}) {
 const integration = require("./integration");
 integration.setIntegrationHooks({ showWindow, sendCommand, bootLog });
 
+// Discord Rich Presence. Same card Spotify shows, from the same state push.
+// Opt-in via STREAMIFY_DISCORD_CLIENT_ID: an unregistered/unknown client id is
+// rejected by Discord, so this stays off unless one is configured.
+const discordRpc = require("./discord-rpc");
+discordRpc.setBootLog(bootLog);
+
+// Windows SMTC (System Media Transport Controls). Same pattern as MPRIS: the
+// renderer pushes state, SMTC mirrors it to the OS and forwards transport
+// commands back. Linux gets MPRIS, macOS is free, Windows needs native wiring.
+const smtc = require("./smtc");
+smtc.setBootLog(bootLog);
+smtc.setCommandSender(sendCommand);
+
 // The renderer reports the track it just started (or stopped) so the OS can
 // show a Now Playing notification and update the MPRIS metadata.
 ipcMain.on(
@@ -758,6 +797,7 @@ ipcMain.on(
     const song = payload?.song || null;
     const state = {
       isPlaying: !!payload?.isPlaying,
+      isLoading: !!payload?.isLoading,
       hasNext: !!payload?.hasNext,
       hasPrevious: !!payload?.hasPrevious,
       position: Number(payload?.position) || 0,
@@ -768,6 +808,12 @@ ipcMain.on(
       integration.clearNowPlaying();
     }
     integration.publishMpris(song, state);
+    if (song) smtc.publish(song, state);
+    else smtc.clear();
+    if (discordRpc.enabled()) {
+      if (song) discordRpc.publish(song, state);
+      else discordRpc.clear();
+    }
   }
 );
 
@@ -775,6 +821,8 @@ ipcMain.on(
 // the notification never cares, so this is fire-and-forget.
 ipcMain.on("desktop:position", (_event, seconds) => {
   integration.publishMprisPosition(Number(seconds) || 0);
+  discordRpc.publishPosition(Number(seconds) || 0);
+  smtc.publishPosition(Number(seconds) || 0);
 });
 
 // ---- in-window overlay title bar -------------------------------------------
@@ -1109,6 +1157,40 @@ if (process.env.STREAMIFY_DEBUG_PORT) {
   app.commandLine.appendSwitch("remote-debugging-port", process.env.STREAMIFY_DEBUG_PORT);
 }
 
+// SoundCloud's embedded widget runs in a cross-site iframe. Chromium's
+// third-party-cookie blocking leaves it with NO cookies (no sc_anonymous_id,
+// no datadome), and SoundCloud's Widevine endpoint answers such requests with
+// 403 — the widget then 404s on /media/.../stream/hls and playback never
+// starts. Verified: the identical widget loaded top-level in this same
+// Electron build gets cookies + a 200 license; inside the app iframe it gets
+// Keep third-party cookies enabled so the embed behaves like the web.
+app.commandLine.appendSwitch(
+  "disable-features",
+  [
+    "TrackingProtection3pcd",
+    "ThirdPartyStoragePartitioning",
+    "BlockThirdPartyCookies",
+    "PrivacySandboxSettings4",
+  ].join(",")
+);
+
+// Enable hardware media key handling + SMTC registration on Windows.
+// Chromium's MediaSession↔SMTC bridge is compiled in but gated behind this
+// flag. Without it, navigator.mediaSession metadata is set but Windows sees
+// nothing (0 GSMTC sessions, no taskbar overlay, media keys don't route).
+app.commandLine.appendSwitch(
+  "enable-features",
+  "HardwareMediaKeyHandling"
+);
+
+// The widget's play() arrives via postMessage from the parent frame, so
+// Chromium never sees a user activation inside the cross-site iframe and
+// blocks the audio: the bar sits at 00:00 with no media segments. A real
+// click inside the app window does not count for the iframe either. Verified
+//: the same widget plays with --autoplay-policy=no-user-gesture-required.
+// ponytail: drop this if playback ever starts honoring iframe activation.
+app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
+
 // ---- boot ------------------------------------------------------------------
 // Widevine CDM: this build ships the castlabs Electron fork (Electron for
 // Content Security), which is the only Electron that can decrypt Widevine —
@@ -1133,6 +1215,33 @@ async function ensureWidevineCdm() {
 
 async function boot() {
   await app.whenReady();
+
+  // Windows SMTC (System Media Transport Controls) requires an AppUserModelId
+  // for the OS to associate navigator.mediaSession with this app — without it,
+  // the volume overlay, lock-screen panel, and media keys see nothing.
+  if (process.platform === "win32") {
+    app.setAppUserModelId("com.streamify.desktop");
+  }
+
+  // SoundCloud's Widevine license CDN rejects Electron's app UA
+  // ("streamify-desktop/… Electron/…") with 403 — measured: the same challenge
+  // POST returns 200 with a stock Chrome UA. Strip the app/Electron tokens
+  // from the global UA fallback so every request (including the widget
+  // iframe's license POST) carries a plain Chrome UA.
+  // ponytail: scope to SoundCloud hosts via webRequest if other sites need
+  // the real UA.
+  try {
+    // Two layers: session.setUserAgent() covers renderer/subresource requests
+    // (verified navigator.userAgent), but the Widevine CDM's license POST uses
+    // app.userAgentFallback — set both or the challenge still carries
+    // "streamify-desktop/… Electron/…" and gets 403.
+    const stock = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
+    app.userAgentFallback = stock;
+    session.defaultSession.setUserAgent(stock);
+    bootLog(`[ua] fallback UA set: ${app.userAgentFallback.includes("Electron") ? "STILL ELECTRON" : "stock Chrome"}`);
+  } catch (error) {
+    bootLog(`[ua] hook failed: ${error && error.message ? error.message : error}`);
+  }
   await ensureWidevineCdm();
   bootLog(`[boot] app-ready dev=${isDev} apiPort=${API_PORT} appPort=${APP_PORT}`);
   nativeTheme.themeSource = "dark";
@@ -1140,6 +1249,8 @@ async function boot() {
   buildMenu();
   createTray();
   integration.wireMpris();
+  smtc.wire();
+  discordRpc.wire();
 
   for (const [key, action] of [
     ["MediaPlayPause", "play-pause"],
