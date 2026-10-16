@@ -969,6 +969,32 @@ html[data-theme-mode="light"] .theme-media-hero [class*="text-white/78"] {
   text-align: right;
 }
 
+/* Persian/Arabic glyph ink is taller than the Latin line box: letters like ج،
+   پ، ی and آ ascend and descend well past it. Tailwind's tight leading
+   utilities (leading-none, leading-tight, leading-[1.1]) shrink the line box
+   until that ink is clipped, which is what makes Persian strings look cut off.
+   Only line-height is touched: layout heights, flex boxes and fixed-height
+   controls are left exactly as authored. */
+[dir="rtl"] :where(
+    .leading-none,
+    .leading-tight,
+    .leading-\[1\.1\],
+    .leading-5,
+    [style*="line-height:1"],
+    [style*="line-height: 1"]
+  ) {
+  line-height: 1.2 !important;
+}
+
+/* Latin section-kicker labels get wide letter-spacing (tracking-[0.18em] and
+   up) via `uppercase tracking-*`. Persian/Arabic script must never be
+   letter-spaced: tracking breaks the joins between letters (نمایشبکهای),
+   which is exactly the "letters separated from each other" look. Latin text
+   is unaffected, and only tracked elements are touched. */
+[dir="rtl"] :where([class*="tracking-"]) {
+  letter-spacing: normal !important;
+}
+
 .reduce-motion *,
 .reduce-motion *::before,
 .reduce-motion *::after {

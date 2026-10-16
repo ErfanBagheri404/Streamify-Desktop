@@ -314,6 +314,16 @@ export async function POST(request: NextRequest) {
           .insert(playlistTracks);
 
         if (insertPlaylistTracksError) {
+          console.error(
+            "[library/sync] insert playlist_tracks failed",
+            {
+              userId: user.id,
+              playlistCount: playlists.length,
+              trackCount: playlistTracks.length,
+              message: insertPlaylistTracksError.message,
+              code: (insertPlaylistTracksError as { code?: string }).code,
+            }
+          );
           return NextResponse.json(
             { error: insertPlaylistTracksError.message },
             { status: 500 }
@@ -362,6 +372,11 @@ export async function POST(request: NextRequest) {
       syncedLikes: likedSongs.length,
     });
   } catch (error) {
+    console.error("[library/sync] unhandled error", {
+      userId: user?.id,
+      message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+    });
     return NextResponse.json(
       {
         error: error instanceof Error ? error.message : "Library sync failed",

@@ -2,7 +2,14 @@
  * The Electron preload script exposes this bridge on `window`. It only exists
  * in the desktop build, so every consumer must feature-detect it.
  */
-export type DesktopCommand = "play-pause" | "play" | "pause" | "next" | "previous" | "seek";
+export type DesktopCommand =
+  | "play-pause"
+  | "play"
+  | "pause"
+  | "next"
+  | "previous"
+  | "seek"
+  | "like";
 
 /** One OS command from the main process (tray, menu, media keys, MPRIS). */
 export interface DesktopCommandPayload {
@@ -31,6 +38,8 @@ export interface NowPlayingReport {
   hasNext: boolean;
   hasPrevious: boolean;
   position: number;
+  /** True when the current track is in liked songs (taskbar like button). */
+  liked?: boolean;
   /** False suppresses the OS notification; MPRIS metadata still updates. */
   notify: boolean;
 }

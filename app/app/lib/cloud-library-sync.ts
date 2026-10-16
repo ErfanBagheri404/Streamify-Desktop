@@ -1,5 +1,8 @@
 import {
+  clearLibraryTombstones,
   createCloudLibrarySnapshot,
+  dropLocallyDeleted,
+  hasPendingLibraryDeletions,
   mergeCloudLibrarySnapshots,
   readLikedSongs,
   readStoredPlaylists,
@@ -27,8 +30,13 @@ export function buildCurrentLocalLibrarySyncSource(): LocalLibrarySyncSource {
   };
 }
 
-function hasSnapshotData(snapshot: CloudLibrarySnapshot): boolean {
-  return snapshot.playlists.length > 0 || snapshot.likedSongs.length > 0;
+function hasSnapshotData(
+  snapshot: CloudLibrarySnapshot | null | undefined
+): boolean {
+  return Boolean(
+    snapshot &&
+      (snapshot.playlists.length > 0 || snapshot.likedSongs.length > 0)
+  );
 }
 
 type CloudTrackRef = CloudLibrarySnapshot["likedSongs"][number];
@@ -320,6 +328,13 @@ function mergeCloudLibrarySnapshotsWithBase(
   };
 }
 
+// Cloud merges must not resurrect something the user deleted locally.
+// Local data is authoritative — the base only fills in track metadata, it is
+// never the authority for what still exists, so a missing locally is a delete.
+function applyTombstones(snapshot: CloudLibrarySnapshot): CloudLibrarySnapshot {
+  return dropLocallyDeleted(snapshot);
+}
+
 export async function pullCloudLibrarySnapshot(): Promise<CloudLibrarySnapshot> {
   const response = await fetch("/api/library/sync", {
     method: "GET",
@@ -369,8 +384,41 @@ export async function pushCloudLibrarySnapshot(snapshot: CloudLibrarySnapshot) {
 
 export async function syncCloudLibrarySnapshot() {
   const localSource = buildCurrentLocalLibrarySyncSource();
-  const remoteSnapshot = await pullCloudLibrarySnapshot();
+  const remoteSnapshot = applyTombstones(await pullCloudLibrarySnapshot());
   const lastSyncedSnapshot = readLastSyncedCloudLibrarySnapshot();
+
+  // Deleting the last remaining item empties the local library. Every branch
+  // below reads "empty local" as "fresh device, adopt the cloud", which adopts
+  // what the user just deleted and then leaves it on the server for good — the
+  // playlist comes back on every later sync. Pending tombstones plus a previous
+  // baseline prove the emptiness is a deletion, so push instead of returning
+  // without pushing. The merge still runs so playlists that only exist on
+  // another device survive: only the tombstoned ones are dropped.
+  if (
+    hasPendingLibraryDeletions() &&
+    !hasSnapshotData(localSource.snapshot) &&
+    hasSnapshotData(lastSyncedSnapshot)
+  ) {
+    const mergedSnapshot = mergeCloudLibrarySnapshotsWithBase(
+      lastSyncedSnapshot,
+      localSource.snapshot,
+      remoteSnapshot
+    );
+
+    await restoreCloudLibrary(mergedSnapshot, {
+      deferSongMetadataRefresh: true,
+    });
+
+    const uploadResult = await pushCloudLibrarySnapshot(mergedSnapshot);
+    // Only now does the server hold the same deletions we hold locally.
+    clearLibraryTombstones();
+    saveLastSyncedCloudLibrarySnapshot(mergedSnapshot);
+    return {
+      syncedPlaylists: uploadResult.syncedPlaylists,
+      syncedLikes: uploadResult.syncedLikes,
+      source: "merged" as const,
+    };
+  }
 
   if (
     hasSnapshotData(remoteSnapshot) &&
@@ -389,6 +437,8 @@ export async function syncCloudLibrarySnapshot() {
     });
 
     const uploadResult = await pushCloudLibrarySnapshot(mergedSnapshot);
+    // Only now does the server hold the same deletions we hold locally.
+    clearLibraryTombstones();
     saveLastSyncedCloudLibrarySnapshot(mergedSnapshot);
     return {
       syncedPlaylists: uploadResult.syncedPlaylists,
@@ -419,7 +469,11 @@ export async function syncCloudLibrarySnapshot() {
     };
   }
 
+  // A sync that completes means the deletions in flight are now reflected on
+  // the server — drop the tombstones so they cannot block a legitimate
+  // re-import of the same playlist id later.
   const uploadResult = await pushCloudLibrarySnapshot(localSource.snapshot);
+  clearLibraryTombstones();
   saveLastSyncedCloudLibrarySnapshot(localSource.snapshot);
   return {
     syncedPlaylists: uploadResult.syncedPlaylists,

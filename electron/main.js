@@ -764,6 +764,11 @@ function createWindow({ splash = false } = {}) {
     mainWindow = null;
   });
 
+  // Taskbar thumbnail buttons are per-window, so they follow the window.
+  thumbar.setWindow(mainWindow);
+  thumbar.setIconDir(path.join(app.getAppPath(), "build", "thumbar"));
+  thumbar.clear();
+
   void mainWindow.loadURL(splash ? splashUrl() : APP_ORIGIN);
   if (splash) mainWindow.once("ready-to-show", () => mainWindow?.show());
   return mainWindow;
@@ -789,6 +794,11 @@ const smtc = require("./smtc");
 smtc.setBootLog(bootLog);
 smtc.setCommandSender(sendCommand);
 
+// Windows taskbar thumbnail buttons (like/prev/play-pause/next). same contract.
+const thumbar = require("./thumbar");
+thumbar.setBootLog(bootLog);
+thumbar.setCommandSender(sendCommand);
+
 // The renderer reports the track it just started (or stopped) so the OS can
 // show a Now Playing notification and update the MPRIS metadata.
 ipcMain.on(
@@ -810,6 +820,15 @@ ipcMain.on(
     integration.publishMpris(song, state);
     if (song) smtc.publish(song, state);
     else smtc.clear();
+    // Taskbar thumbnail buttons mirror the same state (Windows only; the
+    // module no-ops elsewhere).
+    thumbar.update({
+      song: !!song,
+      play: !!state.isPlaying,
+      hasNext: !!state.hasNext,
+      hasPrevious: !!state.hasPrevious,
+      liked: !!payload?.liked,
+    });
     if (discordRpc.enabled()) {
       if (song) discordRpc.publish(song, state);
       else discordRpc.clear();

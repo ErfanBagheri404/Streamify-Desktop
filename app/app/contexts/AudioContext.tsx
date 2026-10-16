@@ -24,6 +24,11 @@ import {
 } from "../lib/provider-endpoints";
 import { readSessionCache, writeSessionCache } from "../lib/session-cache";
 import { normalizeYouTubeThumbnailUrl } from "../lib/youtube-thumbnails";
+import {
+  isSongLiked,
+  LOCAL_LIBRARY_UPDATED_EVENT,
+  toggleLikedSong,
+} from "../lib/local-library";
 
 type AudioType = "file" | "hls" | "soundcloud-drm";
 type PlaybackStrategy = "audio" | "widget";
@@ -747,6 +752,9 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
     ],
   );
   const [currentSong, setCurrentSong] = useState<Song | null>(null);
+  // Taskbar thumbnail like button reflects this; it lives here (not only in
+  // FullscreenPlayer) because the taskbar lives outside the in-window UI.
+  const [isCurrentSongLiked, setIsCurrentSongLiked] = useState(false);
   const [recentSongs, setRecentSongs] = useState<Song[]>([]);
   const [playbackQueue, setPlaybackQueue] = useState<Song[]>([]);
   const [queueIndex, setQueueIndex] = useState(-1);
@@ -4312,6 +4320,13 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
         playPrevious();
         return;
       }
+      // Taskbar thumbnail "add to liked songs" button.
+      if (command === "like") {
+        if (!currentSong) return;
+        const result = toggleLikedSong(currentSong);
+        setIsCurrentSongLiked(result.liked);
+        return;
+      }
       // MPRIS `seek` / `position` arrive as seconds in payload.
       if (command === "seek" && Number.isFinite(payload)) {
         seekTo(payload);
@@ -4325,7 +4340,21 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
     playPrevious,
     resumeSong,
     seekTo,
+    setIsCurrentSongLiked,
   ]);
+  // Track changes and every in-app like/unlike (FullscreenPlayer, collection
+  // pages) both land here, so the taskbar button always mirrors reality.
+  useEffect(() => {
+    if (!currentSong) {
+      setIsCurrentSongLiked(false);
+      return;
+    }
+    const sync = () =>
+      setIsCurrentSongLiked(isSongLiked(currentSong.id, currentSong.source));
+    sync();
+    window.addEventListener(LOCAL_LIBRARY_UPDATED_EVENT, sync);
+    return () => window.removeEventListener(LOCAL_LIBRARY_UPDATED_EVENT, sync);
+  }, [currentSong, setIsCurrentSongLiked]);
 
   // Push the current track and playback state to the main process so the OS
   // surfaces it: the Now Playing notification and Linux MPRIS metadata both
@@ -4353,6 +4382,7 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
       hasNext: queueIndex >= 0 && queueIndex < playbackQueue.length - 1,
       hasPrevious: queueIndex > 0,
       position: audioRef.current?.currentTime || 0,
+      liked: isCurrentSongLiked,
       // The notification is the only visible interruption, so it alone is
       // opt-out. MPRIS metadata keeps flowing either way — the desktop sound
       // menu needs it and it is silent.
@@ -4365,6 +4395,7 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
     playbackQueue,
     queueIndex,
     settings.desktopNotifications,
+    isCurrentSongLiked,
   ]);
 
   useEffect(() => {

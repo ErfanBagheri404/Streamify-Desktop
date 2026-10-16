@@ -1,6 +1,6 @@
 {
   "name": "streamify-desktop",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "private": true,
   "description": "Streamify Desktop - native music player for Windows, macOS and Linux",
   "main": "electron/main.js",
@@ -10,7 +10,7 @@
   },
   "license": "SEE LICENSE IN LICENSE",
   "scripts": {
-    "dev": "cross-env NODE_ENV=development concurrently -k -n api,next,electron \"node scripts/dev-api.mjs\" \"npm run dev --prefix app\" \"wait-on tcp:7861 tcp:3000 && electron .\"",
+    "dev": "cross-env NODE_ENV=development concurrently -n next,electron \"npm run dev --prefix app\" \"wait-on tcp:3000 && electron .\"",
     "dev:app": "npm run dev --prefix app",
     "dev:api": "node scripts/dev-api.mjs",
     "build:api": "esbuild api/server-electron.ts --bundle --platform=node --format=esm --banner:js=\"import{createRequire}from'node:module';const require=createRequire(import.meta.url);\" --outfile=dist/api-server.mjs",
@@ -44,6 +44,7 @@
       "splash.html",
       "build/icon.png",
       "build/icon-tray.png",
+      "build/thumbar",
       "package.json"
     ],
     "asarUnpack": [

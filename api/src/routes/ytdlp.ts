@@ -15,22 +15,63 @@ export function findYtDlpBinary(): string | null {
   const isWin =
     typeof process !== "undefined" && process.platform === "win32";
   const name = isWin ? "yt-dlp.exe" : "yt-dlp";
-  // Packaged: resources/bin/ next to the executable.
+  const fs = (() => {
+    try {
+      return require("node:fs") as typeof import("node:fs");
+    } catch {
+      return null;
+    }
+  })();
+  const exists = (candidate: string): boolean => {
+    if (!fs) return false;
+    try {
+      return fs.existsSync(candidate);
+    } catch {
+      return false;
+    }
+  };
+
+  // Candidate order matters, and each one must be *verified* before use.
+  // `process.resourcesPath` is set even in an unpackaged Electron process (it
+  // points into node_modules/electron/dist/resources), so returning it blindly
+  // shadowed the working repo-relative path — every yt-dlp call died with
+  // ENOENT, taking the last-resort provider with it.
+  const candidates: string[] = [];
   try {
     const res =
       typeof process !== "undefined" ? process.resourcesPath : undefined;
-    if (typeof res === "string" && res) return `${res}/bin/${name}`;
+    if (typeof res === "string" && res) candidates.push(`${res}/bin/${name}`);
   } catch {}
-  // Dev: repo resources/bin (electron is spawned with the repo as cwd).
   try {
     const cwd =
       typeof process !== "undefined" && typeof process.cwd === "function"
         ? process.cwd()
         : "";
-    if (cwd) return `${cwd}/resources/bin/${name}`;
+    // Dev: repo root (electron is spawned with the repo as cwd)...
+    if (cwd) candidates.push(`${cwd}/resources/bin/${name}`);
+    // ...and cwd/app when the API is launched from inside the Next app dir,
+    // which is where a bare `npm run dev --prefix app` style launch lands.
+    if (cwd) candidates.push(`${cwd}/../resources/bin/${name}`);
   } catch {}
-  // Last resort: whatever is on PATH.
-  return "yt-dlp";
+  // Bundled API: resolve relative to this module, not the cwd.
+  try {
+    if (typeof __dirname === "string" && __dirname) {
+      candidates.push(`${__dirname}/../../resources/bin/${name}`);
+      candidates.push(`${__dirname}/../../../resources/bin/${name}`);
+    }
+  } catch {}
+
+  for (const candidate of candidates) {
+    if (exists(candidate)) return candidate;
+  }
+
+  // Nothing on disk matched — hand back the repo-relative guess so the spawn
+  // error names a plausible path, then fall through to PATH.
+  const cwdGuess =
+    typeof process !== "undefined" && typeof process.cwd === "function"
+      ? `${process.cwd()}/resources/bin/${name}`
+      : "";
+  return exists(cwdGuess) ? cwdGuess : name;
 }
 
 export function parseYtDlpJson(stdout: string): YtDlpMetadata | null {
