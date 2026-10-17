@@ -352,11 +352,59 @@ function extractSongResults(payload: unknown): Array<Record<string, unknown>> {
   return toArray(payload).map((entry) => toRecord(entry));
 }
 
-function isStrongEnoughMatch(
-  score: number,
+function isVerifiedTrackMatch(
   track: ExternalCatalogTrack,
+  candidate: { title: string; artist: string; duration?: number },
 ): boolean {
-  return score >= (track.artist.trim() ? 80 : 60);
+  const expectedTitle = normalizeComparisonText(track.title);
+  const actualTitle = normalizeComparisonText(candidate.title);
+  if (!expectedTitle || !actualTitle) return false;
+  if (!titlesAreSameSong(track.title, candidate.title)) return false;
+  if (!artistsAreCompatible(track.artist, candidate.artist)) return false;
+
+  if (
+    typeof track.duration === "number" &&
+    typeof candidate.duration === "number" &&
+    track.duration > 0 &&
+    candidate.duration > 0
+  ) {
+    if (Math.abs(track.duration - candidate.duration) > 12) return false;
+  }
+
+  return true;
+}
+
+function titlesAreSameSong(expected: string, actual: string): boolean {
+  const left = normalizeComparisonText(expected);
+  const right = normalizeComparisonText(actual);
+  if (!left || !right) return false;
+  if (left === right) return true;
+
+  const shorter = Math.min(left.length, right.length);
+  const longer = Math.max(left.length, right.length);
+  if (shorter >= 6 && shorter / longer >= 0.6) {
+    if (left.includes(right) || right.includes(left)) return true;
+  }
+
+  const expectedWords = left.split(" ").filter(Boolean);
+  if (expectedWords.length < 2) return false;
+  const actualWords = new Set(right.split(" ").filter(Boolean));
+  let overlap = 0;
+  for (const word of expectedWords) {
+    if (actualWords.has(word)) overlap += 1;
+  }
+  return overlap >= 2 && overlap / expectedWords.length >= 0.75;
+}
+
+function artistsAreCompatible(expected: string, actual: string): boolean {
+  const left = normalizeComparisonText(expected);
+  const right = normalizeComparisonText(actual);
+  if (!left || !right) return true;
+  if (left === right || left.includes(right) || right.includes(left)) return true;
+  return right
+    .split(" ")
+    .filter(Boolean)
+    .some((token) => token.length >= 3 && left.includes(token));
 }
 
 function normalizeImageArray(
@@ -447,10 +495,12 @@ async function findJioSaavnPlayback(
         .filter((entry) => entry.id || entry.url)
         .sort((left, right) => right.score - left.score);
 
-      const bestMatch = ranked[0];
+      const verified = ranked.filter((entry) =>
+        isVerifiedTrackMatch(track, entry)
+      );
+      const bestMatch = verified[0];
       if (!bestMatch) continue;
       if (!bestMatch.id) continue;
-      if (!isStrongEnoughMatch(bestMatch.score, track)) continue;
 
       return {
         item: bestMatch.item,
@@ -500,6 +550,37 @@ function buildJioSaavnStyleTrack(
       track.album ||
       (typeof match.item.album === "string" ? match.item.album : undefined),
     providerHint: track.provider,
+  };
+}
+
+/**
+ * A catalog row that had no verified JioSaavn stream. Keeps the real identity
+ * (title/artist/cover/duration) so search still shows the song the user asked
+ * for; playback resolves it later via the /api/video source chain.
+ */
+function buildCatalogFallbackTrack(
+  track: ExternalCatalogTrack,
+): Record<string, unknown> {
+  const images = normalizeImageArray(track.coverUrl, undefined);
+  const thumbnailUrl = bestImageUrl(images);
+
+  return {
+    id: track.id ?? `${track.provider}:${track.title}:${track.artist}`,
+    source: track.provider,
+    type: "song",
+    title: track.title,
+    name: track.title,
+    artist: track.artist,
+    primaryArtists: track.artist,
+    image: images,
+    thumbnailUrl,
+    thumbnail: thumbnailUrl,
+    coverUrl: thumbnailUrl,
+    img: thumbnailUrl,
+    duration: track.duration,
+    album: track.album,
+    providerHint: track.provider,
+    unresolved: true,
   };
 }
 
@@ -1006,7 +1087,9 @@ async function searchSpotifyCatalog(
   const matchedTracks = await Promise.all(
     tracks.map(async (track) => {
       const playback = await findJioSaavnPlayback(track, signal);
-      return playback ? buildJioSaavnStyleTrack(track, playback) : null;
+      return playback
+        ? buildJioSaavnStyleTrack(track, playback)
+        : buildCatalogFallbackTrack(track);
     }),
   );
   const songs = matchedTracks.filter(
@@ -1841,7 +1924,9 @@ async function searchItunesCatalog(
   const matchedTracks = await Promise.all(
     tracks.map(async (track) => {
       const playback = await findJioSaavnPlayback(track, signal);
-      return playback ? buildJioSaavnStyleTrack(track, playback) : null;
+      return playback
+        ? buildJioSaavnStyleTrack(track, playback)
+        : buildCatalogFallbackTrack(track);
     }),
   );
 
@@ -1875,7 +1960,9 @@ async function searchDeezerCatalog(
   const matchedTracks = await Promise.all(
     tracks.map(async (track) => {
       const playback = await findJioSaavnPlayback(track, signal);
-      return playback ? buildJioSaavnStyleTrack(track, playback) : null;
+      return playback
+        ? buildJioSaavnStyleTrack(track, playback)
+        : buildCatalogFallbackTrack(track);
     }),
   );
 

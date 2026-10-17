@@ -622,6 +622,217 @@ async function fetchSoundCloudStreamPayload(
   throw new Error("SoundCloud stream URL lookup failed");
 }
 
+async function fetchSoundCloudSearchTracks(
+  config: WorkerConfig,
+  query: string,
+  limit = 10
+): Promise<Array<Record<string, any>>> {
+  const candidates = buildProviderUrlCandidates(
+    config.providers.search.soundcloudSearchProxyBase,
+    ["/tracks", "/api/tracks"],
+    { q: query, limit, offset: 0 }
+  );
+
+  for (const url of candidates) {
+    try {
+      const payload = await fetchJson(url, undefined, 12000);
+      const record = toRecord(payload);
+      const collection = toArray(record.collection ?? record.results)
+        .map((entry) => toRecord(entry))
+        .filter((entry) => entry.id || entry.permalink_url);
+      if (collection.length) return collection;
+    } catch {
+      continue;
+    }
+  }
+
+  return [];
+}
+
+/**
+ * Resolve a catalog track (Spotify / Deezer / iTunes, or anything else without
+ * a native stream) to a SoundCloud track by METADATA rather than by id.
+ *
+ * SoundCloud ids only exist for SoundCloud catalogue rows, so a Spotify id can
+ * never be handed to the SoundCloud path. Search instead, then verify with the
+ * same identity gate the JioSaavn matcher uses, so a MISSING track returns null
+ * instead of silently resolving to a different song.
+ */
+async function findSoundCloudMatch(
+  config: WorkerConfig,
+  title: string,
+  artist?: string,
+  duration?: number
+): Promise<{ id: string; url: string } | null> {
+  const queries = buildSoundCloudQueries(title, artist);
+  if (!queries.length) return null;
+
+  const wanted = {
+    title,
+    artist: artist || "",
+    duration: typeof duration === "number" && duration > 0 ? duration : undefined,
+  };
+
+  const verified: Array<{
+    track: Record<string, any>;
+    title: string;
+    artist: string;
+    duration: number | undefined;
+  }> = [];
+  const seenIds = new Set<string>();
+
+  for (const query of queries) {
+    const tracks = await fetchSoundCloudSearchTracks(config, query);
+    for (const track of tracks) {
+      const id = track.id ? String(track.id) : "";
+      if (id && seenIds.has(id)) continue;
+      if (id) seenIds.add(id);
+
+      const normalizedTitle =
+        typeof track.title === "string" ? track.title.trim() : "";
+      const uploader =
+        typeof toRecord(track.user).username === "string"
+          ? String(toRecord(track.user).username).trim()
+          : typeof track.artist === "string"
+          ? track.artist.trim()
+          : "";
+      // SoundCloud uploads put the artist in the TITLE far more often than in
+      // the uploader field ("Behzad Leito - Peida Nakardam (Ft Anita)" posted
+      // by a fan account), so accept either location.
+      const normalizedArtist = artistMatchIsInTitle(artist, normalizedTitle)
+        ? wanted.artist
+        : uploader;
+
+      const entry = {
+        track,
+        title: normalizedTitle,
+        artist: normalizedArtist,
+        duration: normalizeSoundCloudSeconds(track.duration),
+      };
+      if (!entry.track.id && !entry.track.permalink_url) continue;
+      if (!isVerifiedMetadataMatch(wanted, entry)) continue;
+      verified.push(entry);
+    }
+
+    // Stop as soon as a query yielded a verified FULL-length track: further
+    // queries only add latency, and this is already the best answer.
+    if (verified.some((entry) => (entry.duration ?? 0) > 32)) break;
+  }
+
+  if (!verified.length) return null;
+
+  // Drop 30-second preview clips when a full version is verified, so we never
+  // play a 30s snippet of a 5-minute song.
+  if (verified.some((entry) => (entry.duration ?? 0) > 32)) {
+    const fullOnly = verified.filter((entry) => (entry.duration ?? 0) > 32);
+    verified.length = 0;
+    verified.push(...fullOnly);
+    if (!verified.length) return null;
+  }
+
+  // Prefer the closest duration so a radio edit does not beat the album cut.
+  verified.sort((left, right) => {
+    const leftDelta =
+      left.duration && wanted.duration
+        ? Math.abs(left.duration - wanted.duration)
+        : 999;
+    const rightDelta =
+      right.duration && wanted.duration
+        ? Math.abs(right.duration - wanted.duration)
+        : 999;
+    return leftDelta - rightDelta;
+  });
+
+  const best = verified[0];
+  const bestUrl =
+    typeof best.track.permalink_url === "string" && best.track.permalink_url
+      ? best.track.permalink_url
+      : "";
+  const bestId = best.track.id ? String(best.track.id) : bestUrl;
+  if (!bestId) return null;
+
+  return { id: bestId, url: bestUrl };
+}
+
+function normalizeSoundCloudSeconds(value: unknown): number | undefined {
+  const numeric = toNumber(value);
+  if (numeric == null || numeric <= 0) return undefined;
+  return numeric > 10000 ? Math.round(numeric / 1000) : Math.round(numeric);
+}
+
+function isVerifiedMetadataMatch(
+  wanted: { title: string; artist: string; duration?: number },
+  candidate: { title: string; artist: string; duration?: number }
+): boolean {
+  const expectedTitle = normalizeForMatch(wanted.title);
+  const actualTitle = normalizeForMatch(candidate.title);
+  if (!expectedTitle || !actualTitle) return false;
+
+  const titleExact = expectedTitle === actualTitle;
+  const expectedWords = expectedTitle.split(" ").filter(Boolean);
+  const actualWords = new Set(actualTitle.split(" ").filter(Boolean));
+  let overlap = 0;
+  for (const word of expectedWords) {
+    if (actualWords.has(word)) overlap += 1;
+  }
+
+  const shorter = Math.min(expectedTitle.length, actualTitle.length);
+  const longer = Math.max(expectedTitle.length, actualTitle.length);
+  const titleContains =
+    shorter >= 6 &&
+    longer > 0 &&
+    shorter / longer >= 0.6 &&
+    (expectedTitle.includes(actualTitle) || actualTitle.includes(expectedTitle));
+
+  const titleWordsMatch =
+    expectedWords.length >= 2 &&
+    overlap >= 2 &&
+    overlap / expectedWords.length >= 0.75;
+
+  // A single-word title has no overlap signal, so it must match exactly.
+  const titleStrong =
+    expectedWords.length === 1
+      ? titleExact
+      : titleExact || titleContains || titleWordsMatch;
+  if (!titleStrong) return false;
+
+  const expectedArtist = normalizeForMatch(wanted.artist);
+  const actualArtist = normalizeForMatch(candidate.artist);
+  if (expectedArtist && actualArtist && expectedArtist !== actualArtist) {
+    const shares = expectedArtist
+      .split(" ")
+      .some((part) => part.length >= 3 && actualArtist.includes(part));
+    if (!shares) return false;
+  }
+
+  if (wanted.duration && candidate.duration) {
+    if (Math.abs(wanted.duration - candidate.duration) > 12) return false;
+  }
+
+  return true;
+}
+
+/**
+ * Full SoundCloud resolution for a track identified only by metadata. Returns
+ * the same payload shape as the id-based path.
+ */
+async function resolveSoundCloudByMetadata(
+  request: Request,
+  config: WorkerConfig,
+  title: string,
+  artist?: string,
+  duration?: number
+): Promise<Record<string, unknown>> {
+  const match = await findSoundCloudMatch(config, title, artist, duration);
+  if (!match) {
+    throw new Error(
+      `No SoundCloud track matched "${[title, artist].filter(Boolean).join(" ")}"`
+    );
+  }
+
+  return fetchSoundCloudDetails(request, config, match.id, match.url);
+}
+
 async function fetchSoundCloudDetails(
   request: Request,
   config: WorkerConfig,
@@ -737,6 +948,72 @@ function qualityScore(value: unknown): number {
     if (match) return Number(match[1]);
   }
   return 0;
+}
+
+
+/**
+ * Like normalizeForMatch but KEEPS parenthesised text. SoundCloud uploads
+ * carry featured artists inside brackets ("Behzad Leito - Peida Nakardam
+ * (Ft Anita)"), and normalizeForMatch strips those brackets entirely, which
+ * would hide the featured artist from the artist-presence check.
+ */
+function normalizeKeepingBrackets(value: string | undefined): string {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/\b(feat|ft|featuring|official|video|lyrics|audio|visualizer)\b/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function primaryArtist(artist: string | undefined): string {
+  return String(artist || "")
+    .split(/,|&|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b|\bx\b/i)[0]
+    .trim();
+}
+
+function artistMatchIsInTitle(
+  wantedArtist: string | undefined,
+  candidateTitle: string
+): boolean {
+  const primary = primaryArtist(wantedArtist);
+  const expected = normalizeForMatch(primary);
+  if (!expected) return false;
+  const actual = normalizeKeepingBrackets(candidateTitle);
+  if (!actual) return false;
+  const tokens = expected.split(" ").filter((part) => part.length >= 3);
+  if (!tokens.length) return false;
+  // Every meaningful token of the PRIMARY artist must appear in the title.
+  return tokens.every((part) => actual.includes(part));
+}
+
+/**
+ * Search queries to try against SoundCloud, most-likely first.
+ *
+ * SoundCloud uploads are titled "Artist - Track", while the metadata we get
+ * from Spotify/Deezer/iTunes is `title` + a possibly multi-artist `artist`.
+ * Querying the title first never surfaced the real upload for those; putting
+ * the artist first (and using just the primary artist) is what finds
+ * "Behzad Leito - Peida Nakardam (Ft Anita)".
+ */
+function buildSoundCloudQueries(title: string, artist: string | undefined): string[] {
+  const trimmedTitle = String(title || "").trim();
+  const trimmedArtist = String(artist || "").trim();
+  const primary = primaryArtist(trimmedArtist);
+  const variants: string[] = [];
+  const push = (value: string) => {
+    const normalized = value.replace(/\s+/g, " ").trim();
+    if (normalized && !variants.includes(normalized)) variants.push(normalized);
+  };
+
+  if (trimmedArtist && trimmedTitle) push(`${trimmedArtist} ${trimmedTitle}`);
+  if (primary && primary !== trimmedArtist && trimmedTitle) {
+    push(`${primary} ${trimmedTitle}`);
+  }
+  if (trimmedTitle && trimmedArtist) push(`${trimmedTitle} ${trimmedArtist}`);
+  if (trimmedTitle) push(trimmedTitle);
+
+  return variants;
 }
 
 function normalizeForMatch(value: string | undefined): string {
@@ -1009,9 +1286,18 @@ async function findJioSaavnMatch(
             authorMatchScore(artist, candidate.author),
         }))
         .filter((candidate) => candidate.id)
+        // A fuzzy score floor is what let a MISSING song play an unrelated one:
+        // title "includes" credit alone could clear it. Require the candidate
+        // to actually BE the requested song before returning it.
+        .filter((candidate) =>
+          isVerifiedMetadataMatch(
+            { title, artist: artist || "" },
+            { title: candidate.title, artist: candidate.author }
+          )
+        )
         .sort((left, right) => right.score - left.score);
 
-      if (candidates[0] && candidates[0].score >= 3) {
+      if (candidates[0]) {
         return {
           id: candidates[0].id,
           url: candidates[0].url,
@@ -1088,6 +1374,27 @@ async function fetchVideoDetails(
     meta?: boolean;
   }
 ): Promise<Record<string, unknown>> {
+  const label = options?.title || "";
+
+  // Last-resort stream for catalogue rows that have no stream of their own.
+  // Ordered after JioSaavn (cheapest, highest hit rate) and mirrors the same
+  // metadata -> verified-match contract, so a MISSING track ends as an honest
+  // failure rather than an unrelated song.
+  const resolveViaSoundCloud = async () => {
+    if (!label) return null;
+    try {
+      return await resolveSoundCloudByMetadata(
+        request,
+        config,
+        label,
+        options?.artist,
+        options?.duration,
+      );
+    } catch {
+      return null;
+    }
+  };
+
   if (source === "youtubemusic") {
     const matchedJioSaavnSong = await findJioSaavnMatch(
       config,
@@ -1108,6 +1415,49 @@ async function fetchVideoDetails(
         return jioSaavnPayload;
       }
     }
+  }
+
+  // Spotify / Deezer / iTunes rows used to fall through to "Unsupported
+  // source", which surfaced as a failed playback. Try a verified JioSaavn
+  // stream first, then a verified SoundCloud match.
+  if (source === "spotify" || source === "deezer" || source === "itunes") {
+    const title = options?.title || "";
+
+    // Try both backends in parallel so playback is fast (max of the two
+    // latencies, not the sum), then prefer SoundCloud as the user requested —
+    // SoundCloud first, JioSaavn as fallback. A missing track still ends as
+    // an honest failure rather than a substitute.
+    const jioSaavnPromise = (async () => {
+      if (!title) return null;
+      const matchedJioSaavnSong = await findJioSaavnMatch(
+        config,
+        title,
+        options?.artist
+      );
+      if (!matchedJioSaavnSong?.id) return null;
+      const jioSaavnPayload = await fetchJioSaavnFromEndpoints(
+        request,
+        buildJioSaavnSongEndpoints(
+          matchedJioSaavnSong.id,
+          config.providers.jiosaavn.apiBase,
+          matchedJioSaavnSong.url
+        )
+      );
+      if (jioSaavnPayload?.audioUrl) {
+        return { ...jioSaavnPayload, providerHint: source };
+      }
+      return null;
+    })();
+
+    const [soundCloudPayload, jioSaavnPayload] = await Promise.all([
+      resolveViaSoundCloud(),
+      jioSaavnPromise,
+    ]);
+
+    if (soundCloudPayload) return soundCloudPayload;
+    if (jioSaavnPayload) return jioSaavnPayload;
+
+    throw new Error("No streaming match for " + source + " track: " + label);
   }
 
   if (source === "youtube" || source === "youtubemusic" || !source) {
@@ -1174,6 +1524,12 @@ async function fetchVideoDetails(
       }
     }
 
+    // Every YouTube route failed. Rather than returning a bare failure, try a
+    // verified SoundCloud match so playback still resolves to the RIGHT song
+    // (never a substitute), then fall back to the oEmbed title cards below.
+    const soundCloudFallback = await resolveViaSoundCloud();
+    if (soundCloudFallback) return soundCloudFallback;
+
     try {
       const oembedUrl = `${config.providers.youtube.oembedBase}?url=https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&format=json`;
       const oembedResp = await fetch(oembedUrl);
@@ -1217,6 +1573,19 @@ async function fetchVideoDetails(
   }
 
   if (source === "soundcloud") {
+    // A SoundCloud catalog row resolves by id. A row that reached us with only
+    // metadata (e.g. a catalog track handed over for fallback) searches instead.
+    const hasTrackId = /^\d+$/.test(videoId);
+    const hasUrlHint = Boolean(normalizeSoundCloudUrlHint(options?.urlHint));
+    if (!hasTrackId && !hasUrlHint) {
+      return resolveSoundCloudByMetadata(
+        request,
+        config,
+        options?.title || "",
+        options?.artist,
+        options?.duration,
+      );
+    }
     return fetchSoundCloudDetails(request, config, videoId, options?.urlHint);
   }
 
@@ -1263,6 +1632,7 @@ export async function handleVideo(
   const title = searchParams.get("title") || undefined;
   const artist = searchParams.get("artist") || undefined;
   const urlHint = searchParams.get("url") || undefined;
+  const duration = Number(searchParams.get("duration")) || undefined;
   const prewarm = searchParams.get("prewarm") === "1";
 
   if (prewarm) {
@@ -1296,6 +1666,7 @@ export async function handleVideo(
       title,
       artist,
       urlHint,
+      duration,
     });
     responseCache.set(requestKey, { at: Date.now(), value });
     return json(value);

@@ -384,6 +384,99 @@ function normalizeForMatch(value?: string): string {
     .trim();
 }
 
+/**
+ * Like normalizeForMatch but KEEPS parenthesised text. SoundCloud uploads
+ * carry featured artists inside brackets ("Behzad Leito - Peida Nakardam
+ * (Ft Anita)"), and normalizeForMatch strips those brackets entirely, which
+ * would hide the featured artist from the artist-presence check.
+ */
+function normalizeKeepingBrackets(value?: string): string {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/\b(feat|ft|featuring|official|video|lyrics|audio|visualizer)\b/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function primaryArtist(artist?: string): string {
+  return String(artist || "")
+    .split(/,|&|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b|\bx\b/i)[0]
+    .trim();
+}
+
+/**
+ * ONE identity gate for every metadata->stream lookup (JioSaavn, YouTube,
+ * SoundCloud). A fuzzy score floor is what let a MISSING song play an unrelated
+ * one, so a candidate must actually BE the requested song before we return it.
+ */
+/**
+ * SoundCloud titles routinely read "Artist - Track". Treat the artist as
+ * present when every meaningful token of the wanted artist appears in the
+ * candidate title, so a fan re-upload still counts as the same recording.
+ */
+function artistMatchIsInTitle(
+  wantedArtist: string | undefined,
+  candidateTitle: string,
+): boolean {
+  const primary = primaryArtist(wantedArtist);
+  const expected = normalizeForMatch(primary);
+  if (!expected) return false;
+  const actual = normalizeKeepingBrackets(candidateTitle);
+  if (!actual) return false;
+  const tokens = expected.split(" ").filter((part) => part.length >= 3);
+  if (!tokens.length) return false;
+  // Every meaningful token of the PRIMARY artist must appear in the title.
+  return tokens.every((part) => actual.includes(part));
+}
+
+function isVerifiedMetadataMatch(
+  wanted: { title: string; artist?: string; duration?: number },
+  candidate: { title: string; artist?: string; duration?: number },
+): boolean {
+  const left = normalizeForMatch(wanted.title);
+  const right = normalizeForMatch(candidate.title);
+  if (!left || !right) return false;
+
+  const exact = left === right;
+  const shorter = Math.min(left.length, right.length);
+  const longer = Math.max(left.length, right.length);
+  const contains =
+    shorter >= 6 && longer > 0 && shorter / longer >= 0.6 &&
+    (left.includes(right) || right.includes(left));
+
+  const expectedWords = left.split(" ").filter(Boolean);
+  const actualWords = new Set(right.split(" ").filter(Boolean));
+  let overlap = 0;
+  for (const word of expectedWords) {
+    if (actualWords.has(word)) overlap += 1;
+  }
+  const wordsMatch =
+    expectedWords.length >= 2 &&
+    overlap >= 2 &&
+    overlap / expectedWords.length >= 0.75;
+
+  // A single-word title has no overlap signal, so it must match exactly.
+  if (expectedWords.length === 1 ? !exact : !(exact || contains || wordsMatch)) {
+    return false;
+  }
+
+  const expectedArtist = normalizeForMatch(wanted.artist || "");
+  const actualArtist = normalizeForMatch(candidate.artist || "");
+  if (expectedArtist && actualArtist && expectedArtist !== actualArtist) {
+    const sharesToken = expectedArtist
+      .split(" ")
+      .some((part) => part.length >= 3 && actualArtist.includes(part));
+    if (!sharesToken) return false;
+  }
+
+  if (wanted.duration && candidate.duration) {
+    if (Math.abs(wanted.duration - candidate.duration) > 12) return false;
+  }
+
+  return true;
+}
+
 function titleMatchScore(expectedTitle: string, actualTitle: string): number {
   const expected = normalizeForMatch(expectedTitle);
   const actual = normalizeForMatch(actualTitle);
@@ -653,6 +746,16 @@ async function findYouTubeMatchForTrack(
             ),
         }))
         .filter((candidate) => candidate.id)
+        .filter((candidate) =>
+          isVerifiedMetadataMatch(
+            { title, artist, duration },
+            {
+              title: candidate.title,
+              artist: candidate.author,
+              duration: candidate.duration,
+            },
+          ),
+        )
         .map((candidate) => ({
           id: candidate.id,
           score:
@@ -662,7 +765,7 @@ async function findYouTubeMatchForTrack(
         }))
         .sort((a, b) => b.score - a.score);
 
-      if (candidates[0] && candidates[0].score >= 5) return candidates[0].id;
+      if (candidates[0]) return candidates[0].id;
     } catch {
       continue;
     }
@@ -671,48 +774,190 @@ async function findYouTubeMatchForTrack(
   return null;
 }
 
-async function findSoundCloudMatchForTrack(
+type SoundCloudCandidate = { url: string; seconds: number; score: number };
+
+/**
+ * Search queries to try against SoundCloud, most-likely first.
+ *
+ * SoundCloud uploads are titled "Artist - Track", while the metadata we get
+ * from Spotify/Deezer/iTunes is `title` + a possibly multi-artist `artist`
+ * ("Peida Nakardam" / "Behzad Leito, Anita"). Querying the title first never
+ * surfaced the real upload for those; putting the artist first (and using
+ * just the primary artist) is what finds "Behzad Leito - Peida Nakardam
+ * (Ft Anita)". The old title-first query is kept as a fallback, plus the
+ * bare title for uploads that omit the artist entirely.
+ */
+function buildSoundCloudQueries(title: string, artist: string): string[] {
+  const trimmedTitle = String(title || "").trim();
+  const trimmedArtist = String(artist || "").trim();
+  const primary = primaryArtist(trimmedArtist);
+  const variants: string[] = [];
+  const push = (value: string) => {
+    const normalized = value.replace(/\s+/g, " ").trim();
+    if (normalized && !variants.includes(normalized)) variants.push(normalized);
+  };
+
+  if (trimmedArtist && trimmedTitle) push(`${trimmedArtist} ${trimmedTitle}`);
+  if (primary && primary !== trimmedArtist && trimmedTitle) {
+    push(`${primary} ${trimmedTitle}`);
+  }
+  if (trimmedTitle && trimmedArtist) push(`${trimmedTitle} ${trimmedArtist}`);
+  if (trimmedTitle) push(trimmedTitle);
+
+  return variants;
+}
+
+/** One SoundCloud search: search, then apply the shared identity gate. */
+async function findSoundCloudCandidatesForQuery(
+  query: string,
   title: string,
   artist: string,
-): Promise<string | null> {
-  const query = [title, artist].filter(Boolean).join(" ").trim();
-  if (!query) return null;
-
+  duration?: number,
+): Promise<SoundCloudCandidate[]> {
   const endpoints = buildProviderUrlCandidates(
     "https://beatseek.io/api",
     ["/search", "/api/search"],
-    { query, platform: "soundcloud", type: "tracks", limit: 5 },
+    { query, platform: "soundcloud", type: "tracks", limit: 8 },
   );
 
   for (const endpoint of endpoints) {
     try {
       const payload = toRecord(await fetchJson(endpoint, undefined, 9000));
-      const candidates = toArray(payload.tracks)
+      // beatseek answers with `results`; older/alternate shapes use `tracks`.
+      const rawItems = toArray(payload.results).length
+        ? toArray(payload.results)
+        : toArray(payload.tracks);
+
+      return rawItems
         .map(toRecord)
-        .map((item) => ({
-          title: typeof item.title === "string" ? item.title : "",
-          author:
-            typeof toRecord(item.user).username === "string"
-              ? toRecord(item.user).username
-              : "",
-          url: typeof item.url === "string" ? item.url : "",
-        }))
-        .filter((candidate) => candidate.url)
+        .map((item) => {
+          const candidateTitle =
+            typeof item.title === "string" ? item.title : "";
+          const candidateAuthor =
+            typeof item.artist === "string" && item.artist.trim()
+              ? item.artist.trim()
+              : typeof toRecord(item.user).username === "string"
+                ? toRecord(item.user).username
+                : "";
+          const candidateUrl =
+            typeof item.url === "string"
+              ? item.url
+              : typeof item.permalink_url === "string"
+                ? item.permalink_url
+                : "";
+          const titleScore = titleMatchScore(title, candidateTitle);
+          const rawDuration = toNumber(item.duration);
+          return {
+            title: candidateTitle,
+            author: candidateAuthor,
+            url: candidateUrl,
+            titleScore,
+            duration:
+              rawDuration == null
+                ? undefined
+                : rawDuration > 1000
+                  ? Math.round(rawDuration / 1000)
+                  : Math.round(rawDuration),
+            authorScore: authorMatchScore(artist, candidateAuthor),
+          };
+        })
+        .filter((candidate) => candidate.url && candidate.titleScore >= 2)
+        // Same identity gate as the JioSaavn/YouTube matchers: the track must
+        // BE this song, not merely score high enough.
+        //
+        // SoundCloud uploads put the artist in the TITLE far more often than
+        // in the uploader field ("Michael Jackson - Billie Jean" posted by
+        // some fan account), so accept either location — otherwise every
+        // full-length upload gets rejected for an uploader mismatch.
+        .filter((candidate) =>
+          isVerifiedMetadataMatch(
+            { title, artist, duration },
+            {
+              title: candidate.title,
+              artist:
+                artistMatchIsInTitle(artist, candidate.title)
+                  ? artist
+                  : candidate.author,
+              duration: candidate.duration,
+            },
+          ),
+        )
         .map((candidate) => ({
           url: candidate.url,
-          score:
-            titleMatchScore(title, candidate.title) * 2 +
-            titleMatchScore(artist, candidate.author),
-        }))
-        .sort((a, b) => b.score - a.score);
-
-      if (candidates[0] && candidates[0].score >= 4) return candidates[0].url;
+          seconds: candidate.duration ?? 0,
+          score: candidate.titleScore * 2 + candidate.authorScore,
+        }));
     } catch {
       continue;
     }
   }
 
-  return null;
+  return [];
+}
+
+async function findSoundCloudMatchForTrack(
+  title: string,
+  artist: string,
+  duration?: number,
+): Promise<string | null> {
+  const queries = buildSoundCloudQueries(title, artist);
+  if (!queries.length) return null;
+
+  const collected: SoundCloudCandidate[] = [];
+  const seenUrls = new Set<string>();
+
+  for (const query of queries) {
+    const found = await findSoundCloudCandidatesForQuery(
+      query,
+      title,
+      artist,
+      duration,
+    );
+    for (const candidate of found) {
+      if (seenUrls.has(candidate.url)) continue;
+      seenUrls.add(candidate.url);
+      collected.push(candidate);
+    }
+    // Stop as soon as a query yielded a verified FULL-length track: further
+    // queries only add latency, and this is already the best answer we can
+    // give (the extra variants exist only to rescue tracks the first query
+    // could not find).
+    if (found.some((candidate) => candidate.seconds > 32)) break;
+  }
+
+  if (!collected.length) return null;
+
+  // Never hand back a 30s preview clip when a full version verified.
+  const hasFullVersion = collected.some((candidate) => candidate.seconds > 32);
+  const usable = hasFullVersion
+    ? collected.filter((candidate) => candidate.seconds > 32)
+    : collected;
+  usable.sort((a, b) => b.score - a.score);
+
+  return usable[0]?.url ?? null;
+}
+
+
+/**
+ * Resolve `promise`, or `fallback` if it has not settled within `ms`.
+ *
+ * Provider lookups run against third-party endpoints that can stall for
+ * minutes (a dead mirror, a rate-limit black hole). Without a deadline a
+ * single slow provider blocks the play button indefinitely, so every stage
+ * of the resolution chain gets a budget.
+ */
+function withDeadline<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise<T>((resolve) => {
+    let settled = false;
+    const finish = (value: T) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(fallback), ms);
+    promise.then(finish, () => finish(fallback));
+  });
 }
 
 async function getEndpointsSafe() {
@@ -769,9 +1014,15 @@ async function findJioSaavnMatch(
             authorMatchScore(artist, candidate.author),
         }))
         .filter((candidate) => candidate.id)
+        .filter((candidate) =>
+          isVerifiedMetadataMatch(
+            { title, artist },
+            { title: candidate.title, artist: candidate.author },
+          ),
+        )
         .sort((a, b) => b.score - a.score);
 
-      if (candidates[0] && candidates[0].score >= 3) {
+      if (candidates[0]) {
         return {
           id: candidates[0].id,
           url: candidates[0].url,
@@ -1837,46 +2088,100 @@ async function fetchVideoDetails(
   }
 
   if (source === "soundcloud") {
-      return fetchSoundCloudDetails(videoId, options?.urlHint);
-    }
-
-    if (source === "spotify") {
+    const hasTrackId = /^\d+$/.test(videoId);
+    const hasUrlHint = Boolean(options?.urlHint);
+    if (!hasTrackId && !hasUrlHint) {
       const title = options?.title || "";
       const artist = options?.artist || "";
-      if (!title) throw new Error("Spotify track metadata is missing");
-
-      const providerEndpoints = await getEndpointsSafe();
-      const matchedJioSaavnSong = await findJioSaavnMatch(title, artist);
-      if (matchedJioSaavnSong?.id) {
-        const jioSaavnPayload = await fetchJioSaavnFromEndpoints(
-          buildJioSaavnSongEndpoints(
-            matchedJioSaavnSong.id,
-            providerEndpoints.providers.jiosaavn.apiBase,
-            matchedJioSaavnSong.url,
-          ),
-        );
-        if (jioSaavnPayload?.audioUrl) return jioSaavnPayload;
-      }
-
-      const youtubeId = await findYouTubeMatchForTrack(
+      const soundcloudUrl = await findSoundCloudMatchForTrack(
         title,
         artist,
         options?.duration,
       );
-      if (youtubeId) {
-        return fetchVideoDetails(youtubeId, runId, "youtube", {
-          title,
-          artist,
-        });
-      }
-
-      const soundcloudUrl = await findSoundCloudMatchForTrack(title, artist);
-      if (soundcloudUrl) {
+      if (soundcloudUrl)
         return fetchSoundCloudDetails(soundcloudUrl, soundcloudUrl);
-      }
-
-      throw new Error("No playable source found for Spotify track");
+      throw new Error("No playable source found for SoundCloud track");
     }
+    return fetchSoundCloudDetails(videoId, options?.urlHint);
+  }
+
+  if (
+    source === "spotify" ||
+    source === "deezer" ||
+    source === "itunes"
+  ) {
+    const title = options?.title || "";
+    const artist = options?.artist || "";
+    if (!title) throw new Error(`${source} track metadata is missing`);
+
+    // SoundCloud first (user preference), JioSaavn as fallback — and both are
+    // started together so the wait is the SLOWER of the two, not their sum.
+    const jioSaavnPromise = (async () => {
+      const matchedJioSaavnSong = await findJioSaavnMatch(title, artist);
+      if (!matchedJioSaavnSong?.id) return null;
+      const providerEndpoints = await getEndpointsSafe();
+      const jioSaavnPayload = await fetchJioSaavnFromEndpoints(
+        buildJioSaavnSongEndpoints(
+          matchedJioSaavnSong.id,
+          providerEndpoints.providers.jiosaavn.apiBase,
+          matchedJioSaavnSong.url,
+        ),
+      );
+      return jioSaavnPayload?.audioUrl ? jioSaavnPayload : null;
+    })();
+
+    const soundCloudPromise = (async () => {
+      const soundcloudUrl = await findSoundCloudMatchForTrack(
+        title,
+        artist,
+        options?.duration,
+      );
+      if (!soundcloudUrl) return null;
+      try {
+        return await fetchSoundCloudDetails(soundcloudUrl, soundcloudUrl);
+      } catch {
+        return null;
+      }
+    })();
+
+    // SoundCloud is the preferred source, but it must not hold the play button
+    // hostage: give it a short head start, then take JioSaavn if that is ready
+    // first. Both lookups are already running in parallel, so the user waits
+    // for one provider, never for the sum of two.
+    // Hard budget per stage. A provider that misses its window is abandoned
+    // rather than waited on — the user gets a fast failure on the next
+    // provider instead of a spinner that never ends.
+    //
+    // SoundCloud is the preferred source, so it gets the first window
+    // (2.2s), but that window must be SHORT: SoundCloud's lookup is two
+    // network hops and can take 2-8s, and the user should not sit through
+    // it — JioSaavn, already running in parallel, is usually ready in ~1s.
+    const soundcloudFirst = await withDeadline(soundCloudPromise, 2200, null);
+    if (soundcloudFirst) return soundcloudFirst;
+
+    const jioSaavnPayload = await withDeadline(jioSaavnPromise, 3500, null);
+    if (jioSaavnPayload) return jioSaavnPayload;
+
+    // JioSaavn missed too — take whatever SoundCloud eventually found.
+    const soundcloudPayload = await withDeadline(soundCloudPromise, 3500, null);
+    if (soundcloudPayload) return soundcloudPayload;
+
+    const youtubeId = await withDeadline(
+      findYouTubeMatchForTrack(title, artist, options?.duration),
+      8000,
+      null,
+    );
+    if (youtubeId) {
+      const youtubePayload = await withDeadline(
+        fetchVideoDetails(youtubeId, runId, "youtube", { title, artist }),
+        8000,
+        null,
+      );
+      if (youtubePayload) return youtubePayload;
+    }
+
+    throw new Error(`No playable source found for ${source} track`);
+  }
 
   if (source === "jiosaavn") {
     const providerEndpoints = await getProviderEndpoints();
@@ -2044,6 +2349,18 @@ export async function GET(request: NextRequest) {
       },
     );
     // #endregion
+    const message = error instanceof Error ? error.message : String(error);
+
+    // "Nothing matched" is a normal outcome for a track the providers do not
+    // have — report it as 404 so the client can say "unavailable" instead of
+    // showing a generic server failure.
+    if (/No playable source found|No streaming match/i.test(message)) {
+      return NextResponse.json(
+        { error: "No playable source found", details: message },
+        { status: 404 },
+      );
+    }
+
     console.error("Failed to fetch video details:", error);
   }
 

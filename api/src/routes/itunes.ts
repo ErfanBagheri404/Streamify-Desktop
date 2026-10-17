@@ -1,6 +1,7 @@
 import type { WorkerConfig } from "../config";
 import { json, toArray, toRecord, toNumber, withTimeout } from "../http";
 import {
+  buildCatalogFallbackTrack,
   buildJioSaavnStyleTrack,
   findJioSaavnPlayback,
   type ExternalCatalogTrack,
@@ -87,7 +88,12 @@ export async function searchItunesCatalog(
   const matchedTracks = await Promise.all(
     tracks.map(async (track) => {
       const playback = await findJioSaavnPlayback(config, track, signal);
-      return playback ? buildJioSaavnStyleTrack(track, playback) : null;
+      // No verified JioSaavn hit keeps the catalog row alive rather than
+      // fabricating a near-miss. /video resolves itunes ids through the
+      // JioSaavn -> YouTube -> SoundCloud chain at play time.
+      return playback
+        ? buildJioSaavnStyleTrack(track, playback)
+        : buildCatalogFallbackTrack(track);
     })
   );
 

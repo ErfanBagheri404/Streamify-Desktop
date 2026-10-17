@@ -166,12 +166,68 @@ function extractSongResults(payload: unknown): Array<Record<string, unknown>> {
   return toArray(payload).map((entry) => toRecord(entry));
 }
 
-function isStrongEnoughMatch(
-  score: number,
-  track: ExternalCatalogTrack,
+// A bare score floor accepts garbage: substring hits ("Blinding Lights" in
+// "Blinding Lights (Bongo Cat Edit)") and one shared artist token score high
+// enough to pass, so a MISSING track silently became an unrelated one. Gate on
+// identity instead — the candidate must demonstrably BE the requested track.
+type CandidateIdentity = {
+  title: string;
+  artist: string;
+  duration?: number;
+};
+
+function titlesAreSameSong(expected: string, actual: string): boolean {
+  const left = normalizeComparisonText(expected);
+  const right = normalizeComparisonText(actual);
+  if (!left || !right) return false;
+  if (left === right) return true;
+
+  const shorter = Math.min(left.length, right.length);
+  const longer = Math.max(left.length, right.length);
+  if (shorter >= 6 && shorter / longer >= 0.6) {
+    if (left.includes(right) || right.includes(left)) return true;
+  }
+
+  const expectedWords = left.split(" ").filter(Boolean);
+  if (expectedWords.length < 2) return false;
+  const actualWords = new Set(right.split(" ").filter(Boolean));
+  let overlap = 0;
+  for (const word of expectedWords) {
+    if (actualWords.has(word)) overlap += 1;
+  }
+  return overlap >= 2 && overlap / expectedWords.length >= 0.75;
+}
+
+function artistsAreCompatible(expected: string, actual: string): boolean {
+  const left = normalizeComparisonText(expected);
+  const right = normalizeComparisonText(actual);
+  if (!left || !right) return true;
+  if (left === right || left.includes(right) || right.includes(left)) return true;
+  // Multi-artist rows ("Artist, Other") vs a single-artist upload: require a
+  // real token, not a one-character fragment.
+  return right
+    .split(" ")
+    .filter(Boolean)
+    .some((token) => token.length >= 3 && left.includes(token));
+}
+
+export function isVerifiedTrackMatch(
+  track: Pick<ExternalCatalogTrack, "title" | "artist" | "duration">,
+  candidate: CandidateIdentity,
 ): boolean {
-  const hasArtist = Boolean(track.artist.trim());
-  return score >= (hasArtist ? 80 : 60);
+  if (!titlesAreSameSong(track.title, candidate.title)) return false;
+  if (!artistsAreCompatible(track.artist, candidate.artist)) return false;
+
+  if (
+    typeof track.duration === "number" &&
+    typeof candidate.duration === "number" &&
+    track.duration > 0 &&
+    candidate.duration > 0
+  ) {
+    if (Math.abs(track.duration - candidate.duration) > 12) return false;
+  }
+
+  return true;
 }
 
 function normalizeImageArray(
@@ -257,10 +313,16 @@ export async function findJioSaavnPlayback(
         .filter((entry) => entry.id || entry.url)
         .sort((left, right) => right.score - left.score);
 
-      const bestMatch = ranked[0];
-      if (!bestMatch) continue;
-      if (!isStrongEnoughMatch(bestMatch.score, track)) continue;
-      if (!bestMatch.id) continue;
+      // Keep only candidates that actually are the requested track, then let
+            // the fuzzy score pick the best of those survivors. Taking ranked[0] and
+            // validating it second lets a high-scoring near-miss shadow a correct hit
+            // further down the list.
+            const verified = ranked.filter((entry) =>
+              isVerifiedTrackMatch(track, entry)
+            );
+            const bestMatch = verified[0];
+            if (!bestMatch) continue;
+            if (!bestMatch.id) continue;
 
       return {
         item: bestMatch.item,
@@ -311,4 +373,51 @@ export function buildJioSaavnStyleTrack(
       (typeof match.item.album === "string" ? match.item.album : undefined),
     providerHint: track.provider,
   };
+}
+
+/**
+ * Catalog track that found NO verified streaming source.
+ *
+ * Before this, unmatched tracks were dropped from the result list, which made
+ * search look like a catalogue hole and pushed the caller into guessing a
+ * substitute. Keep the row with its native provider id and let playback
+ * resolve it later through the JioSaavn -> YouTube -> SoundCloud chain.
+ */
+export function buildCatalogFallbackTrack(
+  track: ExternalCatalogTrack,
+): Record<string, unknown> {
+  const thumbnailUrl = track.coverUrl?.trim() || "";
+  return {
+    id: track.id,
+    title: track.title,
+    name: track.title,
+    artist: track.artist,
+    primaryArtists: track.artist,
+    album: track.album,
+    duration: track.duration,
+    image: thumbnailUrl ? [{ url: thumbnailUrl }] : [],
+    thumbnailUrl,
+    thumbnail: thumbnailUrl,
+    coverUrl: thumbnailUrl,
+    img: thumbnailUrl,
+    source: track.provider,
+    type: "song",
+    providerHint: track.provider,
+    isPlayable: true,
+    url: buildCatalogTrackPageUrl(track),
+  };
+}
+
+function buildCatalogTrackPageUrl(track: ExternalCatalogTrack): string {
+  if (!track.id) return "";
+  if (track.provider === "spotify") {
+    return `https://open.spotify.com/track/${track.id}`;
+  }
+  if (track.provider === "deezer") {
+    return `https://www.deezer.com/track/${track.id}`;
+  }
+  if (track.provider === "itunes") {
+    return `https://music.apple.com/us/album/${track.id}`;
+  }
+  return "";
 }

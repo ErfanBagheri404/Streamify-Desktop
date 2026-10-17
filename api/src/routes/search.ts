@@ -852,7 +852,10 @@ export async function handleSearch(
         result = await searchItunes(q, limitNum, config);
         break;
       case "deezer":
-        result = await searchDeezerCatalog(q, limitNum, config);
+        result = {
+          items: await searchDeezerCatalog(q, config, limitNum),
+          nextpage: null,
+        };
         break;
       case "spotify":
         result = {

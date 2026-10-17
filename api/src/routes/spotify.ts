@@ -1,6 +1,7 @@
 import { buildProviderUrlCandidates, type WorkerConfig } from "../config";
 import { toArray, toNumber, toRecord, withTimeout } from "../http";
 import {
+  buildCatalogFallbackTrack,
   buildJioSaavnStyleTrack,
   findJioSaavnPlayback,
   type ExternalCatalogTrack,
@@ -354,12 +355,16 @@ export async function searchSpotifyCatalog(
   const matchedTracks = await Promise.all(
     tracks.map(async (track) => {
       const playback = await findJioSaavnPlayback(config, track, signal);
-      return playback ? buildJioSaavnStyleTrack(track, playback) : null;
+      // No verified JioSaavn hit keeps the catalog row alive rather than
+      // fabricating a near-miss. /video resolves spotify ids through the
+      // JioSaavn -> YouTube -> SoundCloud chain at play time, and dropping the
+      // row here is what used to leave search returning nothing.
+      return playback
+        ? buildJioSaavnStyleTrack(track, playback)
+        : buildCatalogFallbackTrack(track);
     }),
   );
-  const songs = matchedTracks.filter(
-    (entry): entry is Record<string, unknown> => Boolean(entry),
-  );
+  const songs = matchedTracks;
 
   const items =
     wanted === "artist" || wanted === "album"
