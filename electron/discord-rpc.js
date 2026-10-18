@@ -133,11 +133,14 @@ function coverUrl(song) {
 
 // Buttons: Discord renders at most two, label + URL, and the URL MUST be
 // http(s) — a custom scheme like streamify:// fails validation and takes the
-// whole activity down with it. So the first button opens the web player, which
-// is the shareable surface, and the second opens the track's own page on its
-// original service when the track carries one.
-const WEB_PLAYER = (
-  process.env.STREAMIFY_WEBPLAYER_URL || "https://streamify-player.vercel.app"
+// whole activity down with it. So the first button opens the showcase — the
+// page a friend lands on when they tap your listening activity — and the
+// second opens the track's own page on its original service when the track
+// carries one.
+const SHOWCASE_URL = (
+  process.env.STREAMIFY_SHOWCASE_URL ||
+  process.env.STREAMIFY_WEBPLAYER_URL ||
+  "https://streamifyshowcase.vercel.app"
 ).replace(/\/+$/, "");
 
 // Discord's Rich Presence schema has no button-color field — every app's
@@ -146,7 +149,7 @@ const WEB_PLAYER = (
 // player; second is a no-op placeholder until Discord whitelists activity-join
 // (secrets can't coexist with URL buttons, so Listen Along ships disabled).
 function buttonsFor(song) {
-  const buttons = [{ label: "Play on Streamify", url: WEB_PLAYER }];
+  const buttons = [{ label: "Listen on Streamify", url: SHOWCASE_URL }];
   const sourceUrl = song && typeof song.url === "string" ? song.url.trim() : "";
   if (/^https?:\/\//i.test(sourceUrl)) {
     buttons.push({ label: "Open Source", url: sourceUrl });
