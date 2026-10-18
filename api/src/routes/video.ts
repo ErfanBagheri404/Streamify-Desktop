@@ -635,12 +635,16 @@ async function fetchSoundCloudSearchTracks(
 
   for (const url of candidates) {
     try {
-      const payload = await fetchJson(url, undefined, 12000);
+      const payload = await fetchJson(url, undefined, 6000);
       const record = toRecord(payload);
       const collection = toArray(record.collection ?? record.results)
         .map((entry) => toRecord(entry))
         .filter((entry) => entry.id || entry.permalink_url);
-      if (collection.length) return collection;
+      // A successful response (even an empty collection) is authoritative for
+      // this URL shape — do not burn another candidate timeout retrying a
+      // different path. Only fall through to the next candidate on a thrown
+      // (network/timeout) error.
+      return collection;
     } catch {
       continue;
     }
@@ -673,6 +677,21 @@ async function findSoundCloudMatch(
     duration: typeof duration === "number" && duration > 0 ? duration : undefined,
   };
 
+  // Run every query in parallel instead of sequentially: the earlier
+  // sequential loop added the latency of every query that returned no
+  // verified track (each one burning its full candidate timeout). Queries are
+  // independent, so parallelizing makes resolution take the latency of the
+  // slowest single query rather than their sum.
+  const perQueryTracks = await Promise.all(
+    queries.map(async (query) => {
+      try {
+        return await fetchSoundCloudSearchTracks(config, query);
+      } catch {
+        return [];
+      }
+    })
+  );
+
   const verified: Array<{
     track: Record<string, any>;
     title: string;
@@ -681,8 +700,7 @@ async function findSoundCloudMatch(
   }> = [];
   const seenIds = new Set<string>();
 
-  for (const query of queries) {
-    const tracks = await fetchSoundCloudSearchTracks(config, query);
+  for (const tracks of perQueryTracks) {
     for (const track of tracks) {
       const id = track.id ? String(track.id) : "";
       if (id && seenIds.has(id)) continue;
@@ -694,8 +712,8 @@ async function findSoundCloudMatch(
         typeof toRecord(track.user).username === "string"
           ? String(toRecord(track.user).username).trim()
           : typeof track.artist === "string"
-          ? track.artist.trim()
-          : "";
+            ? track.artist.trim()
+            : "";
       // SoundCloud uploads put the artist in the TITLE far more often than in
       // the uploader field ("Behzad Leito - Peida Nakardam (Ft Anita)" posted
       // by a fan account), so accept either location.
@@ -713,10 +731,6 @@ async function findSoundCloudMatch(
       if (!isVerifiedMetadataMatch(wanted, entry)) continue;
       verified.push(entry);
     }
-
-    // Stop as soon as a query yielded a verified FULL-length track: further
-    // queries only add latency, and this is already the best answer.
-    if (verified.some((entry) => (entry.duration ?? 0) > 32)) break;
   }
 
   if (!verified.length) return null;
@@ -1423,39 +1437,39 @@ async function fetchVideoDetails(
   if (source === "spotify" || source === "deezer" || source === "itunes") {
     const title = options?.title || "";
 
-    // Try both backends in parallel so playback is fast (max of the two
-    // latencies, not the sum), then prefer SoundCloud as the user requested —
-    // SoundCloud first, JioSaavn as fallback. A missing track still ends as
-    // an honest failure rather than a substitute.
-    const jioSaavnPromise = (async () => {
-      if (!title) return null;
+    // SoundCloud is the preferred stream (the user explicitly asked for
+    // SoundCloud playback for Spotify rows). Resolve it first and return
+    // immediately on success so we never wait for the JioSaavn fallback
+    // (which can be slow/blocked on restricted networks) when a SoundCloud
+    // match already exists. JioSaavn is only consulted if SoundCloud fails.
+    if (title) {
+      try {
+        const soundCloudPayload = await resolveViaSoundCloud();
+        if (soundCloudPayload) return soundCloudPayload;
+      } catch {}
+    }
+
+    // Fallback: JioSaavn verified stream.
+    if (title) {
       const matchedJioSaavnSong = await findJioSaavnMatch(
         config,
         title,
         options?.artist
       );
-      if (!matchedJioSaavnSong?.id) return null;
-      const jioSaavnPayload = await fetchJioSaavnFromEndpoints(
-        request,
-        buildJioSaavnSongEndpoints(
-          matchedJioSaavnSong.id,
-          config.providers.jiosaavn.apiBase,
-          matchedJioSaavnSong.url
-        )
-      );
-      if (jioSaavnPayload?.audioUrl) {
-        return { ...jioSaavnPayload, providerHint: source };
+      if (matchedJioSaavnSong?.id) {
+        const jioSaavnPayload = await fetchJioSaavnFromEndpoints(
+          request,
+          buildJioSaavnSongEndpoints(
+            matchedJioSaavnSong.id,
+            config.providers.jiosaavn.apiBase,
+            matchedJioSaavnSong.url
+          )
+        );
+        if (jioSaavnPayload?.audioUrl) {
+          return { ...jioSaavnPayload, providerHint: source };
+        }
       }
-      return null;
-    })();
-
-    const [soundCloudPayload, jioSaavnPayload] = await Promise.all([
-      resolveViaSoundCloud(),
-      jioSaavnPromise,
-    ]);
-
-    if (soundCloudPayload) return soundCloudPayload;
-    if (jioSaavnPayload) return jioSaavnPayload;
+    }
 
     throw new Error("No streaming match for " + source + " track: " + label);
   }
