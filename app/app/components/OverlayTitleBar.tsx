@@ -98,6 +98,7 @@ export default function OverlayTitleBar() {
   return (
     <div
       data-overlay-bar=""
+      dir="ltr"
       className="fixed inset-x-0 top-0 z-[90] flex h-9 items-center justify-between border-b border-[color:color-mix(in_srgb,var(--foreground)_10%,transparent)] px-2"
       style={
         {
