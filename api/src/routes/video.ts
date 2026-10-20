@@ -795,13 +795,13 @@ function isVerifiedMetadataMatch(
   const titleContains =
     shorter >= 6 &&
     longer > 0 &&
-    shorter / longer >= 0.6 &&
+    shorter / longer >= 0.75 &&
     (expectedTitle.includes(actualTitle) || actualTitle.includes(expectedTitle));
 
   const titleWordsMatch =
     expectedWords.length >= 2 &&
     overlap >= 2 &&
-    overlap / expectedWords.length >= 0.75;
+    overlap / expectedWords.length >= 0.85;
 
   // A single-word title has no overlap signal, so it must match exactly.
   const titleStrong =
@@ -812,11 +812,18 @@ function isVerifiedMetadataMatch(
 
   const expectedArtist = normalizeForMatch(wanted.artist);
   const actualArtist = normalizeForMatch(candidate.artist);
-  if (expectedArtist && actualArtist && expectedArtist !== actualArtist) {
-    const shares = expectedArtist
-      .split(" ")
-      .some((part) => part.length >= 3 && actualArtist.includes(part));
-    if (!shares) return false;
+  if (expectedArtist) {
+    if (!actualArtist) {
+      // No artist on the candidate at all: only an exact title match can
+      // carry the identity. Otherwise a different song that merely shares a
+      // word with the title would slip through.
+      if (!titleExact) return false;
+    } else if (expectedArtist !== actualArtist) {
+      const shares = expectedArtist
+        .split(" ")
+        .some((part) => part.length >= 3 && actualArtist.includes(part));
+      if (!shares) return false;
+    }
   }
 
   if (wanted.duration && candidate.duration) {
@@ -951,6 +958,15 @@ function pickArrayString(entry: unknown, keys: string[]): string | undefined {
   for (const key of keys) {
     const value = record[key];
     if (typeof value === "string" && value.trim()) return value;
+  }
+  return undefined;
+}
+
+function pickArrayNumber(entry: unknown, keys: string[]): number | undefined {
+  const record = toRecord(entry);
+  for (const key of keys) {
+    const numeric = toNumber(record[key]);
+    if (numeric != null) return numeric;
   }
   return undefined;
 }
@@ -1258,7 +1274,8 @@ function normalizeJioSaavnPayload(
 async function findJioSaavnMatch(
   config: WorkerConfig,
   title: string,
-  artist?: string
+  artist?: string,
+  duration?: number
 ): Promise<{ id: string; url?: string } | null> {
   const query = [title, artist].filter(Boolean).join(" ").trim();
   if (!query) return null;
@@ -1282,16 +1299,21 @@ async function findJioSaavnMatch(
       const candidates = extractSearchCandidates(payload)
         .map((entry) => ({
           title: pickArrayString(entry, ["title", "song", "name"]) || "",
+          // Prefer the dedicated artist fields. "description" is a
+          // "Song - Artist" blob, so it makes the artist check meaningless.
           author:
             pickArrayString(entry, [
-              "description",
               "primary_artists",
               "primaryArtists",
               "singers",
               "artist",
+              "description",
             ]) || "",
           id: pickArrayString(entry, ["id", "identifier"]) || "",
           url: pickArrayString(entry, ["url", "permalink_url"]),
+          duration: normalizeSoundCloudSeconds(
+            pickArrayNumber(entry, ["duration"]) ?? undefined
+          ),
         }))
         .map((candidate) => ({
           ...candidate,
@@ -1305,8 +1327,12 @@ async function findJioSaavnMatch(
         // to actually BE the requested song before returning it.
         .filter((candidate) =>
           isVerifiedMetadataMatch(
-            { title, artist: artist || "" },
-            { title: candidate.title, artist: candidate.author }
+            { title, artist: artist || "", duration },
+            {
+              title: candidate.title,
+              artist: candidate.author,
+              duration: candidate.duration,
+            }
           )
         )
         .sort((left, right) => right.score - left.score);
@@ -1413,7 +1439,8 @@ async function fetchVideoDetails(
     const matchedJioSaavnSong = await findJioSaavnMatch(
       config,
       options?.title || "",
-      options?.artist
+      options?.artist,
+      options?.duration
     );
 
     if (matchedJioSaavnSong?.id) {
@@ -1454,7 +1481,8 @@ async function fetchVideoDetails(
       const matchedJioSaavnSong = await findJioSaavnMatch(
         config,
         title,
-        options?.artist
+        options?.artist,
+        options?.duration
       );
       if (matchedJioSaavnSong?.id) {
         const jioSaavnPayload = await fetchJioSaavnFromEndpoints(

@@ -184,7 +184,7 @@ function titlesAreSameSong(expected: string, actual: string): boolean {
 
   const shorter = Math.min(left.length, right.length);
   const longer = Math.max(left.length, right.length);
-  if (shorter >= 6 && shorter / longer >= 0.6) {
+  if (shorter >= 6 && shorter / longer >= 0.75) {
     if (left.includes(right) || right.includes(left)) return true;
   }
 
@@ -195,7 +195,7 @@ function titlesAreSameSong(expected: string, actual: string): boolean {
   for (const word of expectedWords) {
     if (actualWords.has(word)) overlap += 1;
   }
-  return overlap >= 2 && overlap / expectedWords.length >= 0.75;
+  return overlap >= 2 && overlap / expectedWords.length >= 0.85;
 }
 
 function artistsAreCompatible(expected: string, actual: string): boolean {
@@ -215,8 +215,22 @@ export function isVerifiedTrackMatch(
   track: Pick<ExternalCatalogTrack, "title" | "artist" | "duration">,
   candidate: CandidateIdentity,
 ): boolean {
-  if (!titlesAreSameSong(track.title, candidate.title)) return false;
-  if (!artistsAreCompatible(track.artist, candidate.artist)) return false;
+  const sameTitle = titlesAreSameSong(track.title, candidate.title);
+  if (!sameTitle) return false;
+
+  const expectedArtist = normalizeComparisonText(track.artist);
+  const actualArtist = normalizeComparisonText(candidate.artist);
+  if (expectedArtist) {
+    if (!actualArtist) {
+      // No artist on the candidate: only an exact title match can carry the
+      // identity, otherwise a different song sharing a word slips through.
+      if (normalizeComparisonText(track.title) !== normalizeComparisonText(candidate.title)) {
+        return false;
+      }
+    } else if (!artistsAreCompatible(track.artist, candidate.artist)) {
+      return false;
+    }
+  }
 
   if (
     typeof track.duration === "number" &&

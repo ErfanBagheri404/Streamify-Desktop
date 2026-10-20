@@ -781,6 +781,7 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
   const autoRetryStatusTimerRef = useRef<number | null>(null);
   const autoRetryInFlightRef = useRef(false);
   const autoRetryAttemptCountRef = useRef<Record<string, number>>({});
+  const failureSkipCountRef = useRef(0);
   const playbackRequestIdRef = useRef(0);
   const suppressNextPauseEventRef = useRef(false);
   const currentSongRef = useRef<Song | null>(null);
@@ -820,6 +821,7 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
     songId: string;
     audioUrl: string;
   } | null>(null);
+  const playQueueIndexRef = useRef<(index: number) => void>(() => {});
   const resolveSongForPlaybackRef = useRef<(song: Song) => Promise<Song>>(
     async (song) => normalizeSong(song),
   );
@@ -3994,6 +3996,7 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
         },
       );
       // #endregion
+      failureSkipCountRef.current = 0;
       playSong(resolvedSong, options, requestId);
     } catch (error) {
       if (!isPlaybackRequestCurrent(requestId)) {
@@ -4023,6 +4026,32 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
         throw error;
       }
 
+      // If this track could not be resolved, skip to the next queued track
+      // instead of stalling on an unplayable row. Only show the error in the
+      // usual place when there is no next track to advance to (single song or
+      // last track with no repeat).
+      const queue = playbackQueueRef.current;
+      const currentIndex = queueIndexRef.current;
+      const hasNextInQueue =
+        currentIndex >= 0 && currentIndex < queue.length - 1;
+      const canWrapQueue =
+        repeatModeRef.current === "queue" && queue.length > 1;
+      if (
+        queue.length > 1 &&
+        (hasNextInQueue || canWrapQueue) &&
+        failureSkipCountRef.current < queue.length
+      ) {
+        failureSkipCountRef.current += 1;
+        const nextIndex = hasNextInQueue
+          ? currentIndex + 1
+          : 0;
+        // Advance without surfacing the error; the next attempt will either
+        // play or surface its own error.
+        playQueueIndexRef.current(nextIndex);
+        throw error;
+      }
+
+      failureSkipCountRef.current = 0;
       setPlaybackError(errorMsg);
       clearSongLoading();
       throw error;
@@ -4179,6 +4208,8 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
       console.error("Failed to play queued song:", error);
     });
   };
+
+  playQueueIndexRef.current = playQueueIndex;
 
   const playNext = () => {
     if (queueIndex >= 0 && queueIndex < playbackQueue.length - 1) {
