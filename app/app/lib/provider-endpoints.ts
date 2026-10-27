@@ -445,7 +445,14 @@ export async function getProviderEndpoints(options?: {
       .catch((error) => {
         clearTimeout(timer);
         providerEndpointsPromise = null;
-        throw error;
+        // Never throw: the config worker is one flaky third party, and every
+        // caller (playback resolve, audio proxy) is dead without endpoints.
+        // Fall back to the built-in defaults / last good snapshot instead.
+        console.warn(
+          "[provider-endpoints] config fetch failed, using cached defaults:",
+          error instanceof Error ? error.message : String(error),
+        );
+        return cachedProviderEndpoints;
       });
   }
 
