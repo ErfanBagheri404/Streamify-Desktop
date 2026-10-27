@@ -1829,61 +1829,34 @@ async function searchJioSaavn(
       ?.results;
 
     const items: Array<Record<string, unknown>> = [];
-    for (const entry of topQuery ?? []) {
-      const item: Record<string, unknown> = {
-        ...(entry as Record<string, unknown>),
-        source: "jiosaavn",
-      };
-      // Ensure the entry has the correct 'id' field for the frontend
-      if (!item.id && typeof item.videoId === "string") {
-        item.id = item.videoId;
+    // JioSaavn omits `type` on most rows, so every bucket was indistinguishable
+    // from a song: albums/artists got played as songs and 500'd. Tag each
+    // bucket explicitly.
+    const pushBucket = (
+      bucket: unknown[] | undefined,
+      type: string,
+      extra?: Record<string, unknown>,
+    ) => {
+      for (const entry of bucket ?? []) {
+        const item: Record<string, unknown> = {
+          ...(entry as Record<string, unknown>),
+          source: "jiosaavn",
+          type: (entry as Record<string, unknown>)?.type || type,
+          ...extra,
+        };
+        // Ensure the entry has the correct 'id' field for the frontend
+        if (!item.id && typeof item.videoId === "string") {
+          item.id = item.videoId;
+        }
+        items.push(item);
       }
-      items.push(item);
-    }
-    for (const entry of songs ?? []) {
-      const item: Record<string, unknown> = {
-        ...(entry as Record<string, unknown>),
-        source: "jiosaavn",
-      };
-      // Ensure the entry has the correct 'id' field for the frontend
-      if (!item.id && typeof item.videoId === "string") {
-        item.id = item.videoId;
-      }
-      items.push(item);
-    }
-    for (const entry of albums ?? []) {
-      const item: Record<string, unknown> = {
-        ...(entry as Record<string, unknown>),
-        source: "jiosaavn",
-      };
-      // Ensure the entry has the correct 'id' field for the frontend
-      if (!item.id && typeof item.videoId === "string") {
-        item.id = item.videoId;
-      }
-      items.push(item);
-    }
-    for (const entry of artists ?? []) {
-      const item: Record<string, unknown> = {
-        ...(entry as Record<string, unknown>),
-        source: "jiosaavn",
-      };
-      // Ensure the entry has the correct 'id' field for the frontend
-      if (!item.id && typeof item.videoId === "string") {
-        item.id = item.videoId;
-      }
-      items.push(item);
-    }
-    for (const entry of playlists ?? []) {
-      const item: Record<string, unknown> = {
-        ...(entry as Record<string, unknown>),
-        source: "jiosaavn",
-        type: "playlist",
-      };
-      if (!item.id && typeof item.videoId === "string") {
-        item.id = item.videoId;
-      }
-      items.push(item);
-    }
+    };
+
+    pushBucket(topQuery, "song");
+    pushBucket(songs, "song");
+    pushBucket(albums, "album");
+    pushBucket(artists, "artist");
+    pushBucket(playlists, "playlist", { type: "playlist" });
 
     return {
       items: filterJioSaavnSearchItems(items, filter),

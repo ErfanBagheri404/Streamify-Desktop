@@ -2193,7 +2193,26 @@ async function fetchVideoDetails(
       ),
     );
     if (jioSaavnPayload?.audioUrl) return jioSaavnPayload;
-    throw new Error("Failed to fetch JioSaavn audio stream");
+
+    // Album/playlist rows leak into JioSaavn search results and carry an id the
+    // song endpoint cannot resolve. Retry by title/artist so playback still
+    // works, and report 404 (not 500) when the track genuinely is not there.
+    const matched = await findJioSaavnMatch(
+      options?.title || "",
+      options?.artist,
+    );
+    if (matched?.id && matched.id !== videoId) {
+      const retried = await fetchJioSaavnFromEndpoints(
+        buildJioSaavnSongEndpoints(
+          matched.id,
+          providerEndpoints.providers.jiosaavn.apiBase,
+          matched.url,
+        ),
+      );
+      if (retried?.audioUrl) return retried;
+    }
+
+    throw new Error(`No playable source found for jiosaavn track`);
   }
 
   throw new Error(`Unsupported source: ${source || "unknown"}`);

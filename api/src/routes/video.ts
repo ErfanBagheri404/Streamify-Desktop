@@ -15,6 +15,9 @@ const USER_AGENT =
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const INVIDIOUS_TIMEOUT_MS = 10000;
 const PIPED_TIMEOUT_MS = 7000;
+// A dead relay costs one wasted 1 KB fetch; a live one costs nothing extra
+// because the player needs those bytes anyway.
+const RELAY_PROBE_TIMEOUT_MS = 6000;
 
 const responseCache = new Map<
   string,
@@ -367,6 +370,70 @@ function normalizeVideoPayload(
   };
 }
 
+// The invidious/piped relay hands the player a RAW instance URL — it bypasses
+// our audio-proxy, so it gets no UA, no upstream proxy and no dead-body check.
+// Instances in front of Cloudflare answer 200 to the metadata call and then
+// 1010 (Cloudflare browser block) or a 500 page to every actual segment, which
+// surfaces as a track that resolves but never plays. Probe one kilobyte so the
+// provider loop moves on to the next instance instead.
+async function assertRelayPlays(
+  audioUrl: string | null,
+  relayBase: string,
+  signal?: AbortSignal
+): Promise<void> {
+  if (!audioUrl) return;
+  let parsed: URL;
+  try {
+    parsed = new URL(audioUrl);
+  } catch {
+    return;
+  }
+  // Anything already routed through our own proxy is checked by audio-proxy.
+  let relayHostname = "";
+  try {
+    relayHostname = new URL(relayBase).hostname.toLowerCase();
+  } catch {
+    return;
+  }
+  if (parsed.hostname.toLowerCase() !== relayHostname) return;
+
+  const probeController = new AbortController();
+  const timeoutId = setTimeout(() => probeController.abort(), RELAY_PROBE_TIMEOUT_MS);
+  if (signal) {
+    if (signal.aborted) probeController.abort();
+    else signal.addEventListener("abort", () => probeController.abort(), { once: true });
+  }
+  const probeSignal = probeController.signal;
+  let response: Response;
+  try {
+    response = await fetch(audioUrl, {
+      headers: {
+        // The relay sits behind Cloudflare, which rejects the default runtime
+        // UA with error 1010 — same browser signature audio-proxy sends.
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        Range: "bytes=0-1023",
+      },
+      signal: probeSignal,
+      redirect: "follow",
+    });
+  } catch (error) {
+    clearTimeout(timeoutId);
+    throw new Error(
+      "Invidious relay is unreachable: " +
+        (error instanceof Error ? error.message : String(error))
+    );
+  }
+  const body = await response.arrayBuffer().catch(() => new ArrayBuffer(0));
+  clearTimeout(timeoutId);
+  await response.body?.cancel().catch(() => undefined);
+  if (!response.ok || body.byteLength === 0) {
+    throw new Error(
+      `Invidious relay is not streaming (HTTP ${response.status}, ${body.byteLength} bytes)`
+    );
+  }
+}
+
 async function fetchVideoFromInvidious(
   config: WorkerConfig,
   request: Request,
@@ -387,6 +454,11 @@ async function fetchVideoFromInvidious(
       "Invidious response did not include a playable audio stream"
     );
   }
+  await assertRelayPlays(
+    typeof normalized.audioUrl === "string" ? normalized.audioUrl : null,
+    base,
+    signal
+  );
   return normalized;
 }
 
@@ -408,6 +480,11 @@ async function fetchVideoFromPiped(
   if (!normalized?.audioUrl) {
     throw new Error("Piped response did not include a playable audio stream");
   }
+  await assertRelayPlays(
+    typeof normalized.audioUrl === "string" ? normalized.audioUrl : null,
+    base,
+    signal
+  );
   return normalized;
 }
 
