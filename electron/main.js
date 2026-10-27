@@ -605,6 +605,9 @@ async function startNext() {
   // Without this the Supabase auth handoff fails with ENOTFOUND/Failed to
   // fetch whenever a system proxy is set or local DNS is unreliable.
   const proxyUrl = bootProxyUrl;
+  // Registry-resolved even when the app setting is "off": it is only used as a
+  // last-resort fallback for media fetches that come back with no bytes.
+  const mediaProxyUrl = proxyUrl || winInetProxy();
 
   nextProc = spawn(process.execPath, args, {
     cwd: isStandalone ? standaloneDir : appDir,
@@ -618,6 +621,12 @@ async function startNext() {
       // app instead of plain node — the packaged build needs no system Node.
       ELECTRON_RUN_AS_NODE: "1",
       ...(proxyUrl ? { HTTPS_PROXY: proxyUrl, HTTP_PROXY: proxyUrl } : {}),
+      // Media CDNs (aac.saavncdn.com and friends) answer 2xx with a zero-byte
+      // body when reached directly on a network that DPI-blocks them, which
+      // reads as a track that never starts. Hand the resolved proxy over
+      // separately so the audio proxy can fall back to it when a direct
+      // attempt comes back empty, even with the app-level proxy set to off.
+      ...(mediaProxyUrl ? { STREAMIFY_MEDIA_PROXY: mediaProxyUrl } : {}),
     },
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
@@ -1295,6 +1304,13 @@ async function boot() {
     delete process.env.HTTPS_PROXY;
     delete process.env.HTTP_PROXY;
   }
+  // Media CDNs answer 2xx with a trickle (or no bytes at all) when reached
+  // directly on a network that DPI-blocks them, while the app-level proxy
+  // setting only governs general traffic. Hand the OS proxy over separately so
+  // /audio-proxy can use it even when the setting is "off".
+  const osMediaProxy = bootProxyUrl || winInetProxy();
+  if (osMediaProxy) process.env.STREAMIFY_MEDIA_PROXY = osMediaProxy;
+  else delete process.env.STREAMIFY_MEDIA_PROXY;
   bootLog(`[boot] splash in window #${splash.id} (windows=${BrowserWindow.getAllWindows().length})`);
 
   try {

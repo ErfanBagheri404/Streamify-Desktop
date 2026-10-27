@@ -13,8 +13,21 @@ export async function installProxyFromEnv(): Promise<void> {
     process.env.HTTPS_PROXY ||
     process.env.https_proxy ||
     process.env.HTTP_PROXY ||
-    process.env.http_proxy;
+    process.env.http_proxy ||
+    // The app-level proxy setting is honoured by resolveProxyUrl() and only
+    // feeds the two proxies above. When it is off, this server still needs a
+    // way out: soundcloud.com is unreachable directly on this network, so
+    // getSoundCloudClientId() burned its whole 12s budget three times and
+    // every SoundCloud track 500'd with "Failed to resolve SoundCloud client
+    // id". STREAMIFY_MEDIA_PROXY is the OS proxy, handed over separately.
+    process.env.STREAMIFY_MEDIA_PROXY;
   if (!proxy) return;
+
+  // EnvHttpProxyAgent reads the proxy from env at construction time, so make
+  // sure the value it will see is the one we resolved (it may only be present
+  // in STREAMIFY_MEDIA_PROXY).
+  if (!process.env.HTTPS_PROXY) process.env.HTTPS_PROXY = proxy;
+  if (!process.env.HTTP_PROXY) process.env.HTTP_PROXY = proxy;
 
   try {
     const undici = await import("undici");

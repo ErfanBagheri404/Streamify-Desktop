@@ -1,13 +1,11 @@
 import type { IncomingHttpHeaders } from "node:http";
-import http from "node:http";
-import https from "node:https";
 import { Readable } from "node:stream";
 import { NextRequest, NextResponse } from "next/server";
+import { ProxyAgent, fetch as proxyFetch } from "undici";
 import { requireStreamifyRequest } from "../_lib/request-guard";
 import { getProviderEndpoints } from "../../lib/provider-endpoints";
 
 const AUDIO_REQUEST_TIMEOUT_MS = 20000;
-const MAX_REDIRECTS = 5;
 const RETRYABLE_ERROR_CODES = new Set([
   "ECONNRESET",
   "ETIMEDOUT",
@@ -17,9 +15,9 @@ const RETRYABLE_ERROR_CODES = new Set([
   "ENOTFOUND",
   "EHOSTUNREACH",
 ]);
-const DEFAULT_MAX_RETRIES = 1;
-const GOOGLEVIDEO_MAX_RETRIES = 3;
-const JIOSAAVN_MAX_RETRIES = 3;
+const MAX_RETRIES = 3;
+// How long to wait for the first body byte before calling the upstream dead.
+const FIRST_CHUNK_WAIT_MS = 6000;
 
 function reportDebugEvent(
   _runId: string,
@@ -37,10 +35,6 @@ interface ProxiedAudioResponse {
   body: Readable | ReadableStream;
   finalUrl: string;
   redirectChain: string[];
-}
-
-function isRedirectStatus(statusCode: number): boolean {
-  return statusCode >= 300 && statusCode < 400;
 }
 
 function isRetryableError(error: unknown): boolean {
@@ -83,10 +77,6 @@ function readInterestingHeaders(headers: IncomingHttpHeaders) {
   };
 }
 
-function isGoogleVideoHost(hostname: string): boolean {
-  return hostname.includes("googlevideo.com");
-}
-
 function isSoundCloudHost(hostname: string): boolean {
   return (
     hostname.includes("soundcloud.com") ||
@@ -95,15 +85,71 @@ function isSoundCloudHost(hostname: string): boolean {
   );
 }
 
-function headersToIncomingHttpHeaders(headers: Headers): IncomingHttpHeaders {
+function headersToIncomingHttpHeaders(
+  headers: Headers | { forEach(cb: (value: string, key: string) => void): void },
+): IncomingHttpHeaders {
   const result: IncomingHttpHeaders = {};
-  headers.forEach((value, key) => {
-    result[key] = value;
+  headers.forEach((value: string, key: string) => {
+    result[key.toLowerCase()] = value;
   });
   return result;
 }
 
-async function requestAudioStreamViaFetch(
+// Tries the media proxy the desktop app handed over (STREAMIFY_MEDIA_PROXY).
+// Returns null when the proxy is unusable so the caller can fall back to a
+// direct fetch. Uses its own abort controller: this runs before any other
+// attempt, and the whole point is to survive a network that blackholes the CDN.
+async function requestAudioStreamViaProxy(
+  audioUrl: string,
+  headers: Record<string, string>,
+  redirectChain: string[],
+): Promise<ProxiedAudioResponse | null> {
+  const proxyUrl = process.env.STREAMIFY_MEDIA_PROXY;
+  if (!proxyUrl) return null;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), AUDIO_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await proxyFetch(audioUrl, {
+      method: "GET",
+      headers,
+      redirect: "follow",
+      signal: controller.signal,
+      dispatcher: mediaProxyAgent(proxyUrl),
+    });
+    if (!response.body) return null;
+    // Error statuses (416 for a range past EOF, 403 for an expired signature)
+    // carry no meaningful body but must reach the player unchanged.
+    const hasBytes =
+      response.status >= 400
+        ? true
+        : await readFirstChunk(response.body, controller.signal);
+    if (!hasBytes) return null;
+    const finalUrl = response.url || audioUrl;
+    return {
+      statusCode: response.status,
+      headers: headersToIncomingHttpHeaders(response.headers),
+      body: response.body,
+      finalUrl,
+      redirectChain:
+        finalUrl !== audioUrl ? [...redirectChain, finalUrl] : redirectChain,
+    };
+  } catch (error) {
+    console.error(
+      "Audio proxy media proxy attempt failed:",
+      error instanceof Error ? error.message : error,
+    );
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// Every host goes through `fetch` so it inherits the proxy-aware dispatcher
+// installed in instrumentation.ts. Raw https.request resolved DNS itself and the
+// local resolver blackholes saavncdn.com (10.10.34.36), which burned the full
+// timeout and returned 502 for every JioSaavn track.
+async function requestAudioStream(
   audioUrl: string,
   headers: Record<string, string>,
   retryCount = 0,
@@ -116,6 +162,19 @@ async function requestAudioStreamViaFetch(
   );
 
   try {
+    // A DPI-blackholed CDN does not fail cleanly: it answers 206 and then
+    // trickles bytes at a few hundred per second (measured ~800 B/s against
+    // aac.saavncdn.com), so the track buffers forever instead of erroring.
+    // When the app hands over a proxy, media goes through it first.
+    if (retryCount === 0 && process.env.STREAMIFY_MEDIA_PROXY) {
+      const viaProxy = await requestAudioStreamViaProxy(
+        audioUrl,
+        headers,
+        redirectChain,
+      );
+      if (viaProxy) return viaProxy;
+    }
+
     const response = await fetch(audioUrl, {
       method: "GET",
       headers,
@@ -126,6 +185,19 @@ async function requestAudioStreamViaFetch(
 
     if (!response.body) {
       throw new Error("Audio proxy received empty upstream body");
+    }
+
+    // A blackholed CDN still answers 206/200 with the right headers and then
+    // sends no bytes at all (measured: plain http to aac.saavncdn.com from a
+    // network that DPI-blocks it). Handing that stream to the player looks
+    // like a track that never starts, so peek one chunk and treat an empty
+    // first read as a transport failure worth retrying.
+    const peeked = await readFirstChunk(response.body, controller.signal);
+    if (!peeked) {
+      throw Object.assign(
+        new Error("Upstream returned headers but no body bytes"),
+        { code: "ECONNRESET" },
+      );
     }
 
     const finalUrl = response.url || audioUrl;
@@ -140,10 +212,10 @@ async function requestAudioStreamViaFetch(
       redirectChain: nextRedirectChain,
     };
   } catch (error) {
-    if (retryCount < GOOGLEVIDEO_MAX_RETRIES && isRetryableError(error)) {
+    if (retryCount < MAX_RETRIES && isRetryableError(error)) {
       const delayMs = 250 * (retryCount + 1);
       await new Promise((resolve) => setTimeout(resolve, delayMs));
-      return requestAudioStreamViaFetch(
+      return requestAudioStream(
         audioUrl,
         headers,
         retryCount + 1,
@@ -155,107 +227,6 @@ async function requestAudioStreamViaFetch(
   } finally {
     clearTimeout(timeout);
   }
-}
-
-async function requestAudioStream(
-  audioUrl: string,
-  headers: Record<string, string>,
-  redirectCount = 0,
-  retryCount = 0,
-  redirectChain: string[] = [],
-): Promise<ProxiedAudioResponse> {
-  const url = new URL(audioUrl);
-  if (isGoogleVideoHost(url.hostname)) {
-    return requestAudioStreamViaFetch(
-      audioUrl,
-      headers,
-      retryCount,
-      redirectChain,
-    );
-  }
-
-  const transport = url.protocol === "https:" ? https : http;
-  const shouldForceIpv4 = url.hostname.includes("saavncdn.com");
-  const maxRetries = url.hostname.includes("saavncdn.com")
-    ? JIOSAAVN_MAX_RETRIES
-    : isGoogleVideoHost(url.hostname)
-      ? GOOGLEVIDEO_MAX_RETRIES
-      : DEFAULT_MAX_RETRIES;
-
-  return new Promise((resolve, reject) => {
-    const req = transport.request(
-      url,
-      {
-        method: "GET",
-        headers,
-        ...(shouldForceIpv4 ? { family: 4 } : {}),
-      },
-      (response) => {
-        const statusCode = response.statusCode ?? 502;
-
-        if (isRedirectStatus(statusCode)) {
-          const location = response.headers.location;
-          response.resume();
-
-          if (!location) {
-            reject(new Error("Audio proxy received redirect without location"));
-            return;
-          }
-
-          if (redirectCount >= MAX_REDIRECTS) {
-            reject(new Error("Audio proxy exceeded redirect limit"));
-            return;
-          }
-
-          const redirectUrl = new URL(location, audioUrl).toString();
-          resolve(
-            requestAudioStream(
-              redirectUrl,
-              headers,
-              redirectCount + 1,
-              retryCount,
-              [...redirectChain, redirectUrl],
-            ),
-          );
-          return;
-        }
-
-        resolve({
-          statusCode,
-          headers: response.headers,
-          body: response,
-          finalUrl: audioUrl,
-          redirectChain,
-        });
-      },
-    );
-
-    req.setTimeout(AUDIO_REQUEST_TIMEOUT_MS, () => {
-      req.destroy(new Error("Audio proxy request timed out"));
-    });
-
-    req.on("error", (error) => {
-      if (retryCount < maxRetries && isRetryableError(error)) {
-        const delayMs = 250 * (retryCount + 1);
-        setTimeout(() => {
-          resolve(
-            requestAudioStream(
-              audioUrl,
-              headers,
-              redirectCount,
-              retryCount + 1,
-              redirectChain,
-            ),
-          );
-        }, delayMs);
-        return;
-      }
-
-      reject(error);
-    });
-
-    req.end();
-  });
 }
 
 function buildProxyResponseHeaders(headers: IncomingHttpHeaders): Headers {
@@ -359,6 +330,97 @@ function rewriteHlsPlaylist(playlistText: string, playlistUrl: string): string {
     .join("\n");
 }
 
+// The npm undici copy is used on purpose: Node's builtin fetch is a *different*
+// undici build and rejects an agent created by this one. This route only ever
+// runs on the Node server, and prepare-standalone.mjs ships undici into the
+// packaged app, so a static import is safe here (unlike instrumentation.ts,
+// which also loads for the edge runtime).
+const mediaAgents = new Map<string, ProxyAgent>();
+
+function mediaProxyAgent(proxyUrl: string): ProxyAgent {
+  let agent = mediaAgents.get(proxyUrl);
+  if (!agent) {
+    agent = new ProxyAgent(proxyUrl);
+    mediaAgents.set(proxyUrl, agent);
+  }
+  return agent;
+}
+
+// Reads one chunk to prove the connection is live, then puts the chunk back in
+// front of the rest of the stream so callers see the body unmodified.
+async function readFirstChunk(
+  body: Readable | ReadableStream,
+  signal: AbortSignal,
+  waitMs = FIRST_CHUNK_WAIT_MS,
+): Promise<boolean> {
+  const webBody =
+    body instanceof Readable
+      ? (Readable.toWeb(body) as ReadableStream<Uint8Array>)
+      : (body as ReadableStream<Uint8Array>);
+  const reader = webBody.getReader();
+  let result: ReadableStreamReadResult<Uint8Array>;
+  try {
+    result = await Promise.race([
+      reader.read(),
+      new Promise<never>((_, reject) => {
+        // A live CDN delivers the first chunk in well under a second; a dead
+        // one holds the socket open. Cap the wait so a blackholed host fails
+        // fast instead of burning the whole request timeout.
+        const timer = setTimeout(
+          () =>
+            reject(Object.assign(new Error("no body bytes"), { code: "ETIMEDOUT" })),
+          waitMs,
+        );
+        const abort = () => {
+          clearTimeout(timer);
+          reject(Object.assign(new Error("aborted"), { code: "ECONNRESET" }));
+        };
+        if (signal.aborted) abort();
+        else signal.addEventListener("abort", abort, { once: true });
+      }),
+    ]);
+  } catch (error) {
+    reader.cancel().catch(() => {});
+    throw error;
+  }
+  if (result.done || !result.value?.byteLength) {
+    reader.cancel().catch(() => {});
+    return false;
+  }
+  firstChunkByStream.set(webBody, { chunk: result.value, reader });
+  return true;
+}
+
+// The peeked chunk plus the reader that already owns the rest of the stream.
+// The reader cannot be re-acquired (the stream is locked by design), so it is
+// kept here and replayed by the handler.
+const firstChunkByStream = new WeakMap<
+  ReadableStream<Uint8Array>,
+  { chunk: Uint8Array; reader: ReadableStreamDefaultReader<Uint8Array> }
+>();
+
+function replayFirstChunk(
+  body: ReadableStream<Uint8Array>,
+): ReadableStream<Uint8Array> {
+  const peeked = firstChunkByStream.get(body);
+  if (!peeked) return body;
+  firstChunkByStream.delete(body);
+  const { chunk: first, reader } = peeked;
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(first);
+    },
+    async pull(controller) {
+      const { done, value } = await reader.read();
+      if (done) controller.close();
+      else if (value) controller.enqueue(value);
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+}
+
 async function readResponseBodyAsText(
   body: Readable | ReadableStream,
 ): Promise<string> {
@@ -387,6 +449,21 @@ export async function GET(request: NextRequest) {
   const audioUrl = searchParams.get("url");
   const runId = `pre-audio-${Date.now()}`;
 
+  // Reject anything that is not a plain http(s) URL here, not inside fetch:
+  // `new URL()` on a malformed value throws (500) and `fetch` on file://
+  // answers 502, both of which look like a broken stream to the player.
+  let parsedAudioUrl: URL | null = null;
+  try {
+    parsedAudioUrl = audioUrl ? new URL(audioUrl) : null;
+  } catch {
+    parsedAudioUrl = null;
+  }
+  if (audioUrl && (!parsedAudioUrl || !/^https?:$/.test(parsedAudioUrl.protocol))) {
+    return new NextResponse("Audio URL must be an absolute http(s) URL", {
+      status: 400,
+    });
+  }
+
   // #region debug-point H4:audio-proxy-entry
   reportDebugEvent(
     runId,
@@ -395,7 +472,7 @@ export async function GET(request: NextRequest) {
     "[DEBUG] /api/audio-proxy request received",
     {
       hasAudioUrl: Boolean(audioUrl),
-      audioHost: audioUrl ? new URL(audioUrl).host : null,
+      audioHost: parsedAudioUrl?.host ?? null,
       hasRange: Boolean(request.headers.get("range")),
       urlSummary: audioUrl ? summarizeAudioUrl(audioUrl) : null,
     },
@@ -534,14 +611,37 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    // A CDN error page arrives with 2xx + text/html. Forwarding it as
+    // audio/mp4 makes the player stall with no error at all, so surface the
+    // real upstream failure instead. HLS playlists are text too and are
+    // handled below, hence the playlist check first.
+    const upstreamType = (
+      readHeader(response.headers, "content-type") || ""
+    ).toLowerCase();
+    const looksLikeHtml = upstreamType.includes("text/html");
+
     const responseHeaders = buildProxyResponseHeaders(response.headers);
 
     const treatAsHlsPlaylist =
       isHlsPlaylistResponse(response.finalUrl, response.headers) ||
       /\.m3u8(?:$|\?)/i.test(audioUrl);
 
+    if (looksLikeHtml && !treatAsHlsPlaylist) {
+      console.error(
+        `Audio proxy got an HTML page instead of audio from ${new URL(response.finalUrl).host}`,
+      );
+      return new NextResponse(
+        "Upstream returned an HTML page instead of audio",
+        { status: 502 },
+      );
+    }
+
     if (treatAsHlsPlaylist) {
-      const playlistText = await readResponseBodyAsText(response.body);
+      const playlistText = await readResponseBodyAsText(
+        response.body instanceof Readable
+          ? (Readable.toWeb(response.body) as ReadableStream)
+          : replayFirstChunk(response.body as ReadableStream),
+      );
       const rewrittenPlaylist = rewriteHlsPlaylist(
         playlistText,
         response.finalUrl,
@@ -620,7 +720,7 @@ export async function GET(request: NextRequest) {
     return new NextResponse(
       response.body instanceof Readable
         ? (Readable.toWeb(response.body) as ReadableStream)
-        : response.body,
+        : replayFirstChunk(response.body as ReadableStream),
       {
         status: response.statusCode,
         headers: responseHeaders,
@@ -644,7 +744,10 @@ export async function GET(request: NextRequest) {
       },
     );
     // #endregion
-    console.error("Audio proxy error:", error);
+    console.error(
+      "Audio proxy error:",
+      error instanceof Error ? `${error.name}: ${error.message} (code=${(error as { code?: string }).code ?? "-"})` : String(error),
+    );
     return new NextResponse("Failed to proxy audio stream", { status: 502 });
   }
 }
