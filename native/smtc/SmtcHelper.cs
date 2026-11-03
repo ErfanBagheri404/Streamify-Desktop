@@ -31,6 +31,7 @@ using System;
 using System.Collections.Concurrent;
 using System.IO;
 using System.IO.Pipes;
+using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading;
@@ -47,6 +48,17 @@ namespace Streamify.Smtc
         private static bool _verbose;
         private static double _lastDuration;
         private static volatile bool readerDone;
+        // Cover art fetch: the shell never resolves remote URIs for SMTC
+        // thumbnails, so we download ourselves. Download runs on a worker
+        // thread; bytes are applied on the STA thread during the pump (a
+        // thumbnail built on a non-STA thread throws "access a disposed
+        // object"). _coverToken is latest-requested URL; a finished download
+        // for an older URL is discarded so a track switch never applies stale
+        // art. Only the newest pending payload survives.
+        private static readonly HttpClient _http = CreateHttpClient();
+        private static string _coverToken;
+        private static byte[] _pendingCover;
+        private static readonly object _coverLock = new object();
 
         [STAThread]
         public static int Main(string[] args)
@@ -146,6 +158,8 @@ namespace Streamify.Smtc
                         {
                             case "publish": Publish(root); break;
                             case "clear":
+                                _coverToken = null;
+                                _pendingCover = null;
                                 _controls.DisplayUpdater.ClearAll();
                                 _controls.PlaybackStatus = MediaPlaybackStatus.Closed;
                                 break;
@@ -167,6 +181,11 @@ namespace Streamify.Smtc
                         if (_verbose) Console.Error.WriteLine("line: " + ex.Message);
                     }
                 }
+                byte[] art = Interlocked.Exchange(ref _pendingCover, null);
+                if (art != null)
+                {
+                    ApplyCover(art);
+                }
                 PumpOnce();
                 if (readerDone && incoming.IsEmpty) break; // pipe closed
             }
@@ -178,6 +197,78 @@ namespace Streamify.Smtc
             }
             catch { }
             return 0;
+        }
+
+        // ---- Cover art ------------------------------------------------------
+        // The SMTC shell resolves CreateFromUri only for file/ms-appx/content
+        // URIs; remote https covers are ignored and the flyout renders blank.
+        // So: worker thread downloads the bytes, the STA pump applies them.
+        private static HttpClient CreateHttpClient()
+        {
+            // UseProxy = false: the app hands us localhost URLs and the user's
+            // system proxy (Clash etc.) answers 403 / hangs on loopback.
+            var client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = true, UseProxy = false })
+            {
+                Timeout = TimeSpan.FromSeconds(10),
+                DefaultRequestHeaders =
+                {
+                    // Some artwork CDNs (e.g. JioSaavn) reject empty UAs.
+                    UserAgent = { new System.Net.Http.Headers.ProductInfoHeaderValue("Mozilla", "5.0") },
+                },
+            };
+            return client;
+        }
+
+        private static void StartCoverDownload(string url)
+        {
+            lock (_coverLock) { _coverToken = url; _pendingCover = null; }
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    using var resp = _http.GetAsync(url).GetAwaiter().GetResult();
+                    resp.EnsureSuccessStatusCode();
+                    byte[] data = resp.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult();
+                    lock (_coverLock)
+                    {
+                        if (_coverToken == url)
+                        {
+                            _pendingCover = data;
+                            if (_verbose) Console.Error.WriteLine("cover: downloaded " + data.Length + " bytes");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // Always logged: a blank flyout cover is otherwise invisible
+                    // and the cause is nearly always the fetch, not the shell.
+                    Console.Error.WriteLine("cover: " + ex.GetType().Name + " " + ex.Message + " " + url);
+                }
+            });
+        }
+
+        // Runs on the STA thread only. The stream reference must be consumed by
+        // updater.Update() before the stream dies, so leave both alive for GC.
+        private static void ApplyCover(byte[] data)
+        {
+            try
+            {
+                var stream = new InMemoryRandomAccessStream();
+                using var writer = new DataWriter(stream);
+                writer.WriteBytes(data);
+                writer.StoreAsync().AsTask().GetAwaiter().GetResult();
+                writer.FlushAsync().AsTask().GetAwaiter().GetResult();
+                writer.DetachStream();
+                stream.Seek(0);
+                var updater = _controls.DisplayUpdater;
+                updater.Thumbnail = RandomAccessStreamReference.CreateFromStream(stream);
+                updater.Update();
+                if (_verbose) Console.Error.WriteLine("cover apply: ok " + data.Length + " bytes");
+            }
+            catch (Exception ex)
+            {
+                if (_verbose) Console.Error.WriteLine("cover apply: " + ex.Message);
+            }
         }
 
         private static void WriteLine(object message)
@@ -237,16 +328,18 @@ namespace Streamify.Smtc
                 if (seconds > 0) _lastDuration = seconds;
             }
 
-            // Cover art: hand the shell the URL and let it fetch. Downloading
-            // here buys nothing — the SMTC renderers (volume flyout, lock
-            // screen) resolve CreateFromUri themselves, and an
-            // InMemoryRandomAccessStream has to be built and disposed by the
-            // same STA thread that owns the updater, which the pipe reader
-            // thread is not.
+            // Cover art: the shell does NOT fetch remote URLs —
+            // CreateFromUri only resolves file/ms-appx/content URIs, so an
+            // https cover silently leaves the flyout blank. Download on a
+            // worker and let the pump apply the bytes on the STA thread.
             string cover = GetStr(songEl, "coverUrl");
             if (!string.IsNullOrEmpty(cover) && Uri.TryCreate(cover, UriKind.Absolute, out var art))
             {
-                updater.Thumbnail = RandomAccessStreamReference.CreateFromUri(art);
+                StartCoverDownload(cover);
+            }
+            else if (_verbose)
+            {
+                Console.Error.WriteLine("cover: none (renderer sent " + (cover ?? "null") + ")");
             }
 
             updater.Update();

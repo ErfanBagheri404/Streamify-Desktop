@@ -814,6 +814,11 @@ ipcMain.on(
   "desktop:now-playing",
   (_event, payload) => {
     const song = payload?.song || null;
+    // The renderer hands out app-relative cover paths (/api/youtube-thumbnail…).
+    // Windows SMTC, MPRIS and native notifications all need an absolute URL.
+    if (song?.coverUrl?.startsWith("/")) {
+      song.coverUrl = `${APP_ORIGIN}${song.coverUrl}`;
+    }
     const state = {
       isPlaying: !!payload?.isPlaying,
       isLoading: !!payload?.isLoading,

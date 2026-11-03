@@ -125,7 +125,9 @@ function wire() {
 
   void startServer()
     .then(() => {
-      helper = spawn(exe, [pipeName, "Streamify Desktop"], {
+      // Dev runs get --verbose so cover/metadata failures land in app.log
+      // instead of vanishing; packaged builds stay quiet.
+      helper = spawn(exe, [pipeName, "Streamify Desktop", ...(app.isPackaged ? [] : ["--verbose"])], {
         windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
       });
