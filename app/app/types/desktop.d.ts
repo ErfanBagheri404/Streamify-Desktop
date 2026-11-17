@@ -65,6 +65,34 @@ export interface UpdateProgressInfo {
   total: number;
 }
 
+/** Result of picking an M3U file in the native open dialog. */
+export type M3uImportResult =
+  | {
+      ok: true;
+      path: string;
+      entries: {
+        path?: string;
+        artist?: string;
+        title?: string;
+        duration?: number;
+      }[];
+      warnings: string[];
+    }
+  | { ok: false; canceled?: true; error?: string };
+
+/** Last.fm connection state (never contains the secret or session key). */
+export type LastFmStatus = {
+  connected: boolean;
+  username: string | null;
+  hasCredentials: boolean;
+  pendingAuth: boolean;
+};
+
+/** Result of saving a playlist as M3U via the native save dialog. */
+export type M3uExportResult =
+  | { ok: true; path: string; count: number }
+  | { ok: false; canceled?: true; error?: string };
+
 export interface AuthStartResult {
   ok: boolean;
   /** Opaque per-attempt id, echoes back if the flow completes. */
@@ -133,6 +161,48 @@ export interface StreamifyDesktopBridge {
       mode: "system" | "manual" | "off";
       url: string;
     }) => Promise<{ mode: string; url: string; restartRequired: boolean }>;
+  };
+  /**
+   * Last.fm scrobbling: main owns the credentials (apiSecret/sessionKey never
+   * cross this bridge) and the now-playing/scrobble pipeline.
+   */
+  lastfm?: {
+    /** { connected, username, hasCredentials, pendingAuth } — no secrets. */
+    status: () => Promise<LastFmStatus>;
+    /** Store an API key/secret pair (clears any existing session). */
+    setCredentials: (credentials: {
+      apiKey: string;
+      apiSecret: string;
+    }) => Promise<LastFmStatus>;
+    /** Request a token and open the Last.fm auth page in the browser. */
+    startAuth: () => Promise<{ ok: boolean; token?: string; error?: string }>;
+    /** Exchange the pending token for a session key. */
+    finishAuth: () => Promise<{
+      ok: boolean;
+      username?: string;
+      error?: string;
+    }>;
+    /** Drop the session (keeps the key pair). */
+    disconnect: () => Promise<LastFmStatus>;
+    /** Sanity call (user.getInfo) — resolves { ok, username | error }. */
+    test: () => Promise<{ ok: boolean; username?: string | null; error?: string }>;
+    /** Turn scrobbling on/off (mirrors the settings toggle). */
+    setEnabled: (enabled: boolean) => Promise<boolean>;
+  };
+  /** M3U playlist import/export (native file dialogs owned by main). */
+  playlists?: {
+    /** Open the M3U picker; resolves parsed entries plus parse warnings. */
+    importM3u: () => Promise<M3uImportResult>;
+    /** Save a playlist as M3U via the save dialog. */
+    exportM3u: (payload: {
+      name: string;
+      tracks: {
+        artist?: string;
+        title: string;
+        duration?: number;
+        url?: string;
+      }[];
+    }) => Promise<M3uExportResult>;
   };
   /**
    * Browser-mediated sign-in. The desktop never takes a password: main opens

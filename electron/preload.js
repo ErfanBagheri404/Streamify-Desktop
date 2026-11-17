@@ -73,4 +73,23 @@ contextBridge.exposeInMainWorld("streamifyDesktop", {
     // proxy env once at startup, so a change only fully applies on next launch.
     set: (config) => ipcRenderer.invoke("desktop:proxy-set", config),
   },
+  // M3U playlist import/export: main owns the file dialogs.
+  playlists: {
+    importM3u: () => ipcRenderer.invoke("playlists:import-m3u"),
+    exportM3u: (payload) => ipcRenderer.invoke("playlists:export-m3u", payload),
+  },
+  // Last.fm: main owns the credentials and the scrobble pipeline; the renderer
+  // only drives connect/disconnect and the on/off toggle. apiSecret and
+  // sessionKey never cross this bridge.
+  lastfm: {
+    status: () => ipcRenderer.invoke("desktop:lastfm-status"),
+    setCredentials: (credentials) =>
+      ipcRenderer.invoke("desktop:lastfm-set-credentials", credentials),
+    startAuth: () => ipcRenderer.invoke("desktop:lastfm-start-auth"),
+    finishAuth: () => ipcRenderer.invoke("desktop:lastfm-finish-auth"),
+    disconnect: () => ipcRenderer.invoke("desktop:lastfm-disconnect"),
+    test: () => ipcRenderer.invoke("desktop:lastfm-test"),
+    setEnabled: (enabled) =>
+      ipcRenderer.invoke("desktop:lastfm-set-enabled", enabled),
+  },
 });

@@ -1129,6 +1129,97 @@ export default function LibraryPage() {
     setImportError("");
   };
 
+  // ponytail: renderer-side copy of electron/m3u.js normalizeTrack — that CJS
+  // module imports node "path" and can't be bundled into the client.
+  const normalizeM3uKey = (text?: string) =>
+    (text || "")
+      .toLowerCase()
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^\p{L}\p{N}\s]/gu, "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const handleImportM3u = async () => {
+    const bridge = window.streamifyDesktop?.playlists;
+    if (!bridge) return;
+
+    try {
+      const result = await bridge.importM3u();
+      if (result.ok === false) {
+        if (!result.canceled) {
+          showToast({
+            tone: "error",
+            message: result.error || t("library.m3uImportFailed"),
+          });
+        }
+        return;
+      }
+
+      const pool: Song[] = [
+        ...readStoredPlaylists().flatMap((playlist) => playlist.songs),
+        ...readLikedSongs(),
+      ];
+      const byPair = new Map<string, Song>();
+      const byTitle = new Map<string, Song>();
+      for (const song of pool) {
+        const title = song.title?.trim();
+        if (!title) continue;
+        const titleKey = normalizeM3uKey(title);
+        if (!byTitle.has(titleKey)) byTitle.set(titleKey, song);
+        if (song.artist?.trim()) {
+          byPair.set(normalizeM3uKey(`${song.artist} - ${title}`), song);
+        }
+      }
+
+      const matched: Song[] = [];
+      for (const entry of result.entries) {
+        const title = entry.title?.trim();
+        if (!title) continue;
+        const key = normalizeM3uKey(
+          entry.artist?.trim() ? `${entry.artist} - ${title}` : title
+        );
+        const song = byPair.get(key) || byTitle.get(normalizeM3uKey(title));
+        if (song) matched.push(song);
+      }
+
+      if (!matched.length) {
+        showToast({
+          tone: "error",
+          message: t("library.m3uNoMatches"),
+        });
+        return;
+      }
+
+      const baseName =
+        (result.path.split(/[\\/]/).pop() || "")
+          .replace(/\.(m3u8?)$/i, "")
+          .trim() || "M3U playlist";
+      // One write, deduped by createStoredPlaylist — N addSongToPlaylist calls
+      // re-serialized the whole playlist once per entry.
+      const playlist = createStoredPlaylist(baseName, "", { songs: matched });
+      setUserPlaylists((prev) => [playlist, ...prev]);
+      showToast({
+        tone: "success",
+        message: t("library.m3uImported", {
+          imported: playlist.songs.length,
+          total: result.entries.length,
+          missing: result.entries.length - playlist.songs.length,
+        }),
+        actionLabel: t("library.open"),
+        onAction: () => {
+          openCollectionPath(getLocalCollectionPath(playlist.id));
+        },
+      });
+    } catch (error) {
+      showToast({
+        tone: "error",
+        message:
+          error instanceof Error ? error.message : t("library.m3uImportFailed"),
+      });
+    }
+  };
+
   const submitImportPlaylist = async () => {
     const parsed = parseCollectionUrl(importUrl);
     if (!parsed) {
@@ -1298,6 +1389,38 @@ export default function LibraryPage() {
                     </svg>
                     {t("library.importPlaylist")}
                   </button>
+                  {typeof window !== "undefined" &&
+                    Boolean(window.streamifyDesktop?.playlists) && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void handleImportM3u();
+                        }}
+                        className="theme-button-soft inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-semibold transition sm:gap-2 sm:px-4 sm:py-2 sm:text-sm"
+                        aria-label={t("library.importM3uAria")}
+                      >
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.8"
+                          className="h-4 w-4"
+                          aria-hidden="true"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            d="M12 15V3m0 0 4 4m-4-4L8 7"
+                          />
+                          <path
+                            strokeLinecap="round"
+                            d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"
+                          />
+                        </svg>
+                        {t("library.importM3u")}
+                      </button>
+                    )}
                   {authUser ? (
                     <button
                       type="button"

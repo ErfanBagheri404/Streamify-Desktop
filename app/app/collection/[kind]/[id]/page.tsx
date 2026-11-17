@@ -274,6 +274,30 @@ function PencilGlyph() {
   );
 }
 
+function ExportGlyph() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      className="h-5 w-5"
+      aria-hidden="true"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M12 3v12m0 0 4-4m-4 4-4-4"
+      />
+      <path
+        strokeLinecap="round"
+        d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"
+      />
+    </svg>
+  );
+}
+
 function MoreGlyph() {
   return (
     <svg
@@ -1217,6 +1241,34 @@ export default function CollectionPage() {
     router.replace("/library");
   };
 
+  const handleExportM3u = async () => {
+    const bridge = window.streamifyDesktop?.playlists;
+    if (!bridge || !localCollection) return;
+    try {
+      const result = await bridge.exportM3u({
+        name: displayTitle,
+        tracks: entries.map((entry) => ({
+          artist: entry.artist,
+          title: entry.title,
+          duration: entry.duration,
+          url: entry.url,
+        })),
+      });
+      if (result.ok === false) {
+        if (!result.canceled) {
+          showFeedback(result.error || t("collection.m3uExportFailed"), "error");
+        }
+        return;
+      }
+      showFeedback(t("collection.m3uExported", { count: result.count }));
+    } catch (error) {
+      showFeedback(
+        error instanceof Error ? error.message : t("collection.m3uExportFailed"),
+        "error"
+      );
+    }
+  };
+
   const handleRemoveEntryFromPlaylist = (entry: CollectionEntry) => {
     if (!isRemovableLocalPlaylist) return;
 
@@ -1359,6 +1411,21 @@ export default function CollectionPage() {
               >
                 <span>{t("collection.renamePlaylistAction")}</span>
                 <PencilGlyph />
+              </button>
+            ) : null}
+            {isRemovableLocalPlaylist &&
+            typeof window !== "undefined" &&
+            Boolean(window.streamifyDesktop?.playlists) ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setIsPlaylistActionsOpen(false);
+                  void handleExportM3u();
+                }}
+                className="theme-button-soft flex w-full items-center justify-between rounded-2xl border px-4 py-3 text-left text-sm font-medium transition hover:text-[color:var(--foreground)]"
+              >
+                <span>{t("collection.exportM3uAction")}</span>
+                <ExportGlyph />
               </button>
             ) : null}
             {isRemovableLocalPlaylist ? (

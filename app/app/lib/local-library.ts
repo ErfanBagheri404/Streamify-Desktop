@@ -78,7 +78,16 @@ function normalizeSongSnapshot(song: Song): Song {
       : song.coverUrl;
 
   return {
-    id: song.id == null ? "" : String(song.id),
+    // An id-less song used to normalize to "" and then get silently dropped by
+    // dedupeStoredSongs, emptying playlists while the UI still toasted "Added".
+    // Derive a stable, deterministic id from the remaining fields instead.
+    id: song.id
+      ? String(song.id)
+      : `${song.source ?? "unknown"}:${
+            song.audioUrl ||
+            song.url ||
+            `${song.title ?? ""}|${song.artist ?? ""}|${song.duration ?? ""}`
+          }`,
     title: song.title,
     artist: song.artist,
     artistId: song.artistId,
@@ -154,11 +163,13 @@ function dedupeSongs(songs: Song[]): Song[] {
   const output: Song[] = [];
 
   for (const song of songs) {
-    if (!song?.id) continue;
-    const key = getSongStorageKey(song);
+    // Normalize first: normalizeSongSnapshot derives an id for id-less songs,
+    // so they are deduped like any other entry instead of being dropped.
+    const normalized = normalizeSongSnapshot(song);
+    const key = getSongStorageKey(normalized);
     if (seen.has(key)) continue;
     seen.add(key);
-    output.push(normalizeSongSnapshot(song));
+    output.push(normalized);
   }
 
   return output;

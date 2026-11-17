@@ -62,6 +62,7 @@ export interface AppSettings {
   // Desktop shell only (Electron). Web builds ignore these.
   desktopNotifications: boolean;
   resumeLastTrack: boolean;
+  lastFmScrobbling: boolean;
 }
 
 export const APP_SETTINGS_STORAGE_KEY = "streamifyAppSettings";
@@ -99,6 +100,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   showCommunityBanner: true,
   desktopNotifications: true,
   resumeLastTrack: true,
+  lastFmScrobbling: false,
 };
 
 function isAppLanguage(value: unknown): value is AppLanguage {
@@ -228,5 +230,9 @@ export function sanitizeAppSettings(value: unknown): AppSettings {
       typeof record.resumeLastTrack === "boolean"
         ? record.resumeLastTrack
         : DEFAULT_APP_SETTINGS.resumeLastTrack,
+    lastFmScrobbling:
+      typeof record.lastFmScrobbling === "boolean"
+        ? record.lastFmScrobbling
+        : DEFAULT_APP_SETTINGS.lastFmScrobbling,
   };
 }

@@ -22,6 +22,7 @@ import {
   hasUserProvider,
 } from "../lib/auth-user";
 import { getSupabaseBrowserClient } from "../lib/supabase/browser";
+import type { LastFmStatus } from "../types/desktop";
 
 function SparkGlyph() {
   return (
@@ -291,6 +292,176 @@ function ProxySetting() {
             className="theme-button-soft shrink-0 rounded-xl border px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-45"
           >
             {t("settings.proxyApply")}
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function LastFmSetting() {
+  const { t } = useAppLanguage();
+  const [status, setStatus] = useState<LastFmStatus | null>(null);
+  const [apiKey, setApiKey] = useState("");
+  const [apiSecret, setApiSecret] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    window.streamifyDesktop?.lastfm
+      ?.status()
+      .then((next) => {
+        if (!cancelled) setStatus(next);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const lastfm =
+    typeof window !== "undefined" ? window.streamifyDesktop?.lastfm : undefined;
+  if (!lastfm) return null;
+
+  const run = async (action: () => Promise<unknown>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await action();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+      void lastfm
+        .status()
+        .then(setStatus)
+        .catch(() => {});
+    }
+  };
+
+  const connected = !!status?.connected;
+  const pending = !!status?.pendingAuth;
+  const hasCredentials = !!status?.hasCredentials;
+  const softButton =
+    "theme-button-soft rounded-xl border px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-45";
+
+  return (
+    <div className="grid gap-3">
+      <p className="theme-muted text-sm font-semibold">
+        {connected
+          ? t("settings.lastFmConnected", { username: status?.username ?? "" })
+          : pending
+            ? t("settings.lastFmPending")
+            : t("settings.lastFmNotConnected")}
+      </p>
+      {error ? (
+        <p className="text-sm text-red-300">
+          {t("settings.lastFmError")}: {error}
+        </p>
+      ) : null}
+      {!connected && !pending ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            type="password"
+            value={apiKey}
+            onChange={(event) => setApiKey(event.target.value)}
+            placeholder={t("settings.lastFmApiKey")}
+            aria-label={t("settings.lastFmApiKey")}
+            autoComplete="off"
+            className="theme-button-soft min-w-40 flex-1 rounded-xl border px-3 py-2 text-sm outline-none"
+          />
+          <input
+            type="password"
+            value={apiSecret}
+            onChange={(event) => setApiSecret(event.target.value)}
+            placeholder={t("settings.lastFmApiSecret")}
+            aria-label={t("settings.lastFmApiSecret")}
+            autoComplete="off"
+            className="theme-button-soft min-w-40 flex-1 rounded-xl border px-3 py-2 text-sm outline-none"
+          />
+          <button
+            type="button"
+            onClick={() =>
+              void run(async () => {
+                // Keys already on disk are reused; only overwrite when both
+                // fields are filled.
+                if (apiKey.trim() && apiSecret.trim()) {
+                  const saved = await lastfm.setCredentials({
+                    apiKey: apiKey.trim(),
+                    apiSecret: apiSecret.trim(),
+                  });
+                  setStatus(saved);
+                  setApiKey("");
+                  setApiSecret("");
+                }
+                const auth = await lastfm.startAuth();
+                if (!auth.ok) {
+                  throw new Error(auth.error || "auth-start-failed");
+                }
+              })
+            }
+            disabled={
+              busy ||
+              (!hasCredentials && (!apiKey.trim() || !apiSecret.trim()))
+            }
+            className={softButton}
+          >
+            {t("settings.lastFmConnect")}
+          </button>
+        </div>
+      ) : null}
+      {pending ? (
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() =>
+              void run(async () => {
+                const done = await lastfm.finishAuth();
+                if (!done.ok) {
+                  throw new Error(done.error || "auth-failed");
+                }
+              })
+            }
+            disabled={busy}
+            className="theme-accent-fill rounded-xl px-4 py-2 text-sm font-semibold transition disabled:opacity-45"
+          >
+            {t("settings.lastFmFinishAuth")}
+          </button>
+          <button
+            type="button"
+            onClick={() => void run(() => lastfm.disconnect())}
+            disabled={busy}
+            className={softButton}
+          >
+            {t("settings.lastFmDisconnect")}
+          </button>
+        </div>
+      ) : null}
+      {connected ? (
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => void run(() => lastfm.disconnect())}
+            disabled={busy}
+            className={softButton}
+          >
+            {t("settings.lastFmDisconnect")}
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              void run(async () => {
+                const result = await lastfm.test();
+                if (!result.ok) {
+                  throw new Error(result.error || "test-failed");
+                }
+              })
+            }
+            disabled={busy}
+            className={softButton}
+          >
+            {t("settings.lastFmTest")}
           </button>
         </div>
       ) : null}
@@ -932,6 +1103,36 @@ export default function SettingsPage() {
                 layout="stacked"
                 control={<ProxySetting />}
               />
+                </Section>
+              )}
+
+            {typeof window !== "undefined" &&
+              Boolean(window.streamifyDesktop?.isDesktop) && (
+                <Section
+                  eyebrow={t("settings.desktop")}
+                  title={t("settings.lastFm")}
+                  description={t("settings.lastFmDescription")}
+                >
+                  <SettingRow
+                    label={t("settings.lastFmScrobbling")}
+                    description={t("settings.lastFmScrobblingDescription")}
+                    control={
+                      <Toggle
+                        enabled={settings.lastFmScrobbling}
+                        onClick={() =>
+                          updateSettings({
+                            lastFmScrobbling: !settings.lastFmScrobbling,
+                          })
+                        }
+                      />
+                    }
+                  />
+                  <SettingRow
+                    label={t("settings.lastFmAccount")}
+                    description={t("settings.lastFmAccountDescription")}
+                    layout="stacked"
+                    control={<LastFmSetting />}
+                  />
                 </Section>
               )}
 

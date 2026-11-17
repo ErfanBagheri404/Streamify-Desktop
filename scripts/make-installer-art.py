@@ -1,25 +1,19 @@
 # Generates the NSIS wizard art (MUI sidebar + header BMPs) from build/icon.png.
-# electron-builder's assisted installer renders these on its pages; without them
-# the wizard is the bare default Windows grey. Run after any icon change.
+# electron-builder's assisted installer renders these on its pages.
 #   python scripts/make-installer-art.py
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parent.parent
 ICON = ROOT / "build" / "icon.png"
 OUT = ROOT / "build"
 
-BG = (17, 19, 24)        # app surface, matches the shell
-PANEL = (24, 27, 34)     # slightly lifted panel
-ACCENT = (255, 61, 76)   # streamify red
+BG = (20, 22, 24)        # dark surface
+BG_TOP = (26, 28, 32)
+BG_BOT = (16, 17, 19)
 TEXT = (236, 238, 242)
 MUTED = (150, 157, 170)
-
-
-def rounded_mask(size, radius):
-    m = Image.new("L", size, 0)
-    ImageDraw.Draw(m).rounded_rectangle((0, 0, size[0] - 1, size[1] - 1), radius, fill=255)
-    return m
+ACCENT = (255, 61, 76)
 
 
 def paste_glyph(bg, icon_path, cx, cy, size):
@@ -34,32 +28,29 @@ def paste_glyph(bg, icon_path, cx, cy, size):
     return out
 
 
-def sidebars():
-    """MUI_SIDEBAR_IMAGE: 164x314, left rail, top-aligned branding."""
-    w, h = 164, 314
+def vgrad(w, h):
     img = Image.new("RGBA", (w, h), BG + (255,))
     d = ImageDraw.Draw(img)
-
-    # soft vertical gradient so the rail doesn't read as flat black
     for y in range(h):
-        t = y / h
-        d.line(
-            [(0, y), (w, y)],
-            fill=(int(BG[0] + 10 * t), int(BG[1] + 11 * t), int(BG[2] + 13 * t), 255),
-        )
+        t = y / max(h - 1, 1)
+        r = int(BG_TOP[0] + (BG_BOT[0] - BG_TOP[0]) * t)
+        g = int(BG_TOP[1] + (BG_BOT[1] - BG_TOP[1]) * t)
+        b = int(BG_TOP[2] + (BG_BOT[2] - BG_TOP[2]) * t)
+        d.line([(0, y), (w, y)], fill=(r, g, b, 255))
+    return img
 
-    # accent hairline down the right edge
-    d.rectangle((w - 3, 0, w - 1, h), fill=ACCENT + (255,))
 
+def sidebars():
+    """MUI_WELCOMEFINISHPAGE_BITMAP: 164x314, left rail, dark Berno-like."""
+    w, h = 164, 314
+    img = vgrad(w, h)
     # glyph block, centered horizontally
     img = paste_glyph(img, ICON, w / 2, 92, 84)
-
     d = ImageDraw.Draw(img)
     d.text((w // 2, 152), "Streamify", anchor="mm", fill=TEXT + (255,))
     d.text((w // 2, 170), "Desktop", anchor="mm", fill=MUTED + (255,))
-    d.line((w // 2 - 26, 186, w // 2 + 26, 186), fill=ACCENT + (255,))
+    d.line((w // 2 - 26, 186, w // 2 + 26, 186), fill=ACCENT + (220,))
     d.text((w // 2, 206), "v" + version(), anchor="mm", fill=MUTED + (255,))
-
     img.convert("RGB").save(OUT / "installerSidebar.bmp", "BMP")
     print("wrote build/installerSidebar.bmp", (w, h))
 
@@ -67,14 +58,7 @@ def sidebars():
 def header():
     """MUI_HEADERIMAGE: 150x57 strip shown on later wizard pages."""
     w, h = 150, 57
-    img = Image.new("RGBA", (w, h), BG + (255,))
-    d = ImageDraw.Draw(img)
-    for x in range(w):
-        t = x / w
-        d.line(
-            [(x, 0), (x, h)],
-            fill=(int(BG[0] + 12 * t), int(BG[1] + 13 * t), int(BG[2] + 16 * t), 255),
-        )
+    img = vgrad(w, h)
     img = paste_glyph(img, ICON, 32, h / 2, 40)
     d = ImageDraw.Draw(img)
     d.text((62, h / 2 - 7), "Streamify", anchor="lm", fill=TEXT + (255,))
@@ -85,7 +69,6 @@ def header():
 
 def version():
     import json
-
     return json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["version"]
 
 

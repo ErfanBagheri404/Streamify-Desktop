@@ -125,6 +125,12 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     } catch {}
   }, [settings.rememberLastSearch]);
 
+  // Last.fm lives in the main process: the renderer only owns this switch, so
+  // mirror it across the bridge whenever it changes (desktop build only).
+  useEffect(() => {
+    void window.streamifyDesktop?.lastfm?.setEnabled(settings.lastFmScrobbling);
+  }, [settings.lastFmScrobbling]);
+
   const value = useMemo<SettingsContextType>(
     () => ({
       settings,

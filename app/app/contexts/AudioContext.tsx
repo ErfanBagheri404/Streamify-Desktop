@@ -3511,7 +3511,15 @@ export const AudioProvider: React.FC<AudioProviderProps> = ({ children }) => {
     const response = await fetchBackendRoute("/video", {
       searchParams: params,
     });
-    const payload = (await response.json()) as Record<string, unknown>;
+    // Backend can answer with an HTML/empty error page (proxy down, 431, 502).
+    // response.json() then threw a SyntaxError that surfaced as a bare
+    // "Failed to play collection entry" instead of the real error message.
+    let payload: Record<string, unknown> = {};
+    try {
+      payload = (await response.json()) as Record<string, unknown>;
+    } catch {
+      payload = {};
+    }
 
     // #region debug-point H4:resolve-response
     reportDebugEvent(

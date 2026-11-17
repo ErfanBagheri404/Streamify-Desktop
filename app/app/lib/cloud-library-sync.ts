@@ -252,6 +252,16 @@ function mergePlaylistWithBase(
     return localPlaylist || basePlaylist || null;
   }
 
+  // The cloud push is a full replace (delete-then-insert), so a GET can
+  // legitimately observe a playlist with no tracks. Reading that as "deleted
+  // on another device" wiped songs that still existed locally, and saving the
+  // merged result made the loss permanent. An empty remote never deletes.
+  const baseSongs = basePlaylist?.songs || [];
+  const remoteSongs =
+    remotePlaylist.songs.length === 0 && baseSongs.length > 0
+      ? localPlaylist.songs
+      : remotePlaylist.songs;
+
   return {
     id: localPlaylist.id,
     name: chooseScalarValue(
@@ -270,9 +280,9 @@ function mergePlaylistWithBase(
       remotePlaylist.createdAt
     ),
     songs: mergeTrackRefsWithBase(
-      basePlaylist?.songs || [],
+      baseSongs,
       localPlaylist.songs,
-      remotePlaylist.songs
+      remoteSongs
     ),
   };
 }
@@ -382,7 +392,18 @@ export async function pushCloudLibrarySnapshot(snapshot: CloudLibrarySnapshot) {
   };
 }
 
-export async function syncCloudLibrarySnapshot() {
+let syncChain: Promise<unknown> = Promise.resolve();
+
+// Overlapping syncs interleaved with the destructive (delete-then-insert) push:
+// one sync could GET the library while another was rewriting it and see an
+// empty track list. Serialize them.
+export function syncCloudLibrarySnapshot() {
+  const run = syncChain.then(runCloudLibrarySync, runCloudLibrarySync);
+  syncChain = run.catch(() => {});
+  return run;
+}
+
+async function runCloudLibrarySync() {
   const localSource = buildCurrentLocalLibrarySyncSource();
   const remoteSnapshot = applyTombstones(await pullCloudLibrarySnapshot());
   const lastSyncedSnapshot = readLastSyncedCloudLibrarySnapshot();

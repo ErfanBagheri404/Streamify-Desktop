@@ -17,9 +17,11 @@ const {
   nativeImage,
   nativeTheme,
   session,
+  dialog,
 } = require("electron");
 const path = require("path");
 const fs = require("fs");
+const { parseM3u, writeM3u } = require("./m3u");
 const http = require("http");
 const { spawn, execFileSync } = require("child_process");
 const { pathToFileURL } = require("url");
@@ -805,6 +807,7 @@ smtc.setCommandSender(sendCommand);
 
 // Windows taskbar thumbnail buttons (like/prev/play-pause/next). same contract.
 const thumbar = require("./thumbar");
+const lastfm = require("./lastfm");
 thumbar.setBootLog(bootLog);
 thumbar.setCommandSender(sendCommand);
 
@@ -819,6 +822,7 @@ ipcMain.on(
     if (song?.coverUrl?.startsWith("/")) {
       song.coverUrl = `${APP_ORIGIN}${song.coverUrl}`;
     }
+    lastfm.onNowPlaying(payload);
     const state = {
       isPlaying: !!payload?.isPlaying,
       isLoading: !!payload?.isLoading,
@@ -853,6 +857,7 @@ ipcMain.on(
 // Position updates are high-frequency; MPRIS only needs the latest one, and
 // the notification never cares, so this is fire-and-forget.
 ipcMain.on("desktop:position", (_event, seconds) => {
+  lastfm.onPosition(Number(seconds) || 0);
   integration.publishMprisPosition(Number(seconds) || 0);
   discordRpc.publishPosition(Number(seconds) || 0);
   smtc.publishPosition(Number(seconds) || 0);
@@ -872,6 +877,24 @@ ipcMain.on("desktop:menu-popup", (event) => {
   const menu = Menu.getApplicationMenu();
   if (win && menu) menu.popup({ window: win });
 });
+
+// ---- lastfm ----------------------------------------------------------------
+// Credentials live in main (lastfm.json in userData) and never reach the
+// renderer; the bridge only forwards status/auth calls.
+ipcMain.handle("desktop:lastfm-status", () => lastfm.getStatus());
+ipcMain.handle("desktop:lastfm-set-enabled", (_event, enabled) =>
+  lastfm.setEnabled(Boolean(enabled))
+);
+ipcMain.handle("desktop:lastfm-set-credentials", (_event, input) =>
+  lastfm.setCredentials(input)
+);
+ipcMain.handle("desktop:lastfm-start-auth", () => lastfm.startAuth());
+ipcMain.handle("desktop:lastfm-finish-auth", () => lastfm.finishAuth());
+ipcMain.handle("desktop:lastfm-disconnect", () => lastfm.disconnect());
+ipcMain.handle("desktop:lastfm-test", () => lastfm.test());
+
+// Settle any listen that crossed the threshold before the process dies.
+app.on("before-quit", () => lastfm.flush());
 
 // ---- proxy setting ----------------------------------------------------------
 // Changing the proxy needs the Next child restarted, so the renderer only
@@ -919,6 +942,64 @@ ipcMain.handle("desktop:proxy-set", (_event, next) => {
   }
 
   return { ...config, restartRequired: changed };
+});
+
+// ---- M3U playlist import / export -----------------------------------------
+function sanitizePlaylistFileName(name) {
+  return String(name || "playlist")
+    .replace(/[\\/:*?"<>|]+/g, "_")
+    .trim()
+    .replace(/^\.+/, "")
+    .slice(0, 120) || "playlist";
+}
+
+ipcMain.handle("playlists:import-m3u", async () => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return { ok: false, error: "No window available" };
+  }
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Import M3U playlist",
+    filters: [{ name: "M3U playlist", extensions: ["m3u", "m3u8"] }],
+    properties: ["openFile"],
+  });
+  if (result.canceled || !result.filePaths.length) {
+    return { ok: false, canceled: true };
+  }
+  const filePath = result.filePaths[0];
+  try {
+    const stat = fs.statSync(filePath);
+    if (stat.size > 2 * 1024 * 1024) {
+      return { ok: false, error: "File too large (max 2 MB)" };
+    }
+    const text = fs.readFileSync(filePath, "utf8");
+    const { entries, warnings } = parseM3u(text, path.dirname(filePath));
+    return { ok: true, path: filePath, entries, warnings };
+  } catch (error) {
+    return { ok: false, error: error?.message || "Failed to read file" };
+  }
+});
+
+ipcMain.handle("playlists:export-m3u", async (_event, payload) => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return { ok: false, error: "No window available" };
+  }
+  const name = sanitizePlaylistFileName(payload?.name || "playlist");
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: "Export M3U playlist",
+    defaultPath: `${name}.m3u`,
+    filters: [{ name: "M3U playlist", extensions: ["m3u"] }],
+  });
+  if (result.canceled || !result.filePath) {
+    return { ok: false, canceled: true };
+  }
+  try {
+    const tracks = Array.isArray(payload?.tracks) ? payload.tracks : [];
+    const content = writeM3u({ name: payload?.name || name, tracks });
+    fs.writeFileSync(result.filePath, content, "utf8");
+    return { ok: true, path: result.filePath, count: tracks.length };
+  } catch (error) {
+    return { ok: false, error: error?.message || "Failed to write file" };
+  }
 });
 
 // ---- menu + media keys + tray ---------------------------------------------
