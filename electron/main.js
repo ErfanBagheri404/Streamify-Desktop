@@ -156,6 +156,13 @@ function isLocalUrl(url) {
   );
 }
 
+// Last-resort net for network failures in background work: an aborted upstream
+// fetch (track skip, sleep/resume, dropped Wi-Fi) must not pop Electron's
+// "A JavaScript error occurred in the main process" dialog over the app.
+process.on("unhandledRejection", (reason) => {
+  bootLog(`[main] unhandledRejection: ${reason && reason.message ? reason.message : reason}`);
+});
+
 function boundsFile() {
   return path.join(app.getPath("userData"), "window-bounds.json");
 }

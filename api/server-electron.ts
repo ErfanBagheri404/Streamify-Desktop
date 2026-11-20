@@ -124,7 +124,14 @@ export async function startApiServer(
         return;
       }
 
-      Readable.fromWeb(response.body as any).pipe(res);
+      // The renderer aborts audio/proxy requests constantly (track skip, seek,
+      // window close). With no error handler the upstream fetch dies with
+      // "TypeError: terminated", re-emitted as an unhandled 'error' on the body
+      // stream, and Electron shows it as a main-process crash dialog.
+      const body = Readable.fromWeb(response.body as any);
+      body.on("error", () => res.destroy());
+      res.on("close", () => body.destroy());
+      body.pipe(res);
     } catch (error) {
       res.statusCode = 500;
       res.setHeader("Content-Type", "application/json");
